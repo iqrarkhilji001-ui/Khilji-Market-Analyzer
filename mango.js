@@ -1,5 +1,5 @@
 /**
- * KHILJI Market Analyzer - MANGO BOT v3.0.0
+ * KHILJI Market Analyzer - MANGO BOT v3.1.0
  * Production JavaScript Engine: /public/mango.js
  * Mode: Production
  * 
@@ -52,12 +52,18 @@
   function discoverMarketData() {
     var raw = null;
     var sourceName = 'NONE DETECTED';
+    var diagnostics = {
+      candidatesChecked: 0,
+      ohlcCandidates: 0,
+      rejectedCandidates: 0,
+      notes: []
+    };
 
-    // Absolute Test Data Isolation: Explicitly block and scrub all test/demo feeds
+    // Production isolation: never use test/demo feeds or manually stored candles.
     if (typeof window !== 'undefined') {
-      if (window.__MANGO_TEST_CANDLES__) {
-        try { delete window.__MANGO_TEST_CANDLES__; } catch (e) {}
-      }
+      try {
+        if (window.__MANGO_TEST_CANDLES__) delete window.__MANGO_TEST_CANDLES__;
+      } catch (e) {}
       try {
         if (window.localStorage) {
           window.localStorage.removeItem('mango_candles');
@@ -66,90 +72,120 @@
       } catch (e) {}
     }
 
-    // Adapter 1: TradingView active widget (public API) - conservative check
+    function looksLikeCandle(x) {
+      if (!x) return false;
+      if (Array.isArray(x)) return x.length >= 5;
+      if (typeof x !== 'object') return false;
+      var hasO = x.open !== undefined || x.o !== undefined;
+      var hasH = x.high !== undefined || x.h !== undefined;
+      var hasL = x.low !== undefined || x.l !== undefined;
+      var hasC = x.close !== undefined || x.c !== undefined;
+      var hasT = x.timestamp !== undefined || x.time !== undefined || x.t !== undefined || x.x !== undefined;
+      return hasO && hasH && hasL && hasC && hasT;
+    }
+
+    function considerArray(arr, label) {
+      diagnostics.candidatesChecked++;
+      if (!Array.isArray(arr) || arr.length < 5) {
+        diagnostics.rejectedCandidates++;
+        return false;
+      }
+      var sampleCount = Math.min(arr.length, 8);
+      var hits = 0;
+      for (var q = 0; q < sampleCount; q++) if (looksLikeCandle(arr[q])) hits++;
+      if (hits >= Math.min(3, sampleCount)) {
+        diagnostics.ohlcCandidates++;
+        raw = arr;
+        sourceName = label;
+        return true;
+      }
+      diagnostics.rejectedCandidates++;
+      return false;
+    }
+
+    // Adapter 1: public TradingView widget data, when directly exposed.
     try {
       if (window.tvWidget && typeof window.tvWidget.activeChart === 'function') {
         var tvChart = window.tvWidget.activeChart();
-        if (tvChart && typeof tvChart === 'object' && Array.isArray(tvChart.data) && tvChart.data.length >= 10) {
-          // Strictly verify that the structure contains genuine OHLC properties
-          var sampleTv = tvChart.data[0];
-          if (sampleTv && typeof sampleTv === 'object') {
-            var hasTvOhlc = (sampleTv.open !== undefined && sampleTv.high !== undefined && sampleTv.low !== undefined && sampleTv.close !== undefined) ||
-                            (sampleTv.o !== undefined && sampleTv.h !== undefined && sampleTv.l !== undefined && sampleTv.c !== undefined) ||
-                            (Array.isArray(sampleTv) && sampleTv.length >= 5);
-            if (hasTvOhlc) {
-              raw = tvChart.data;
-              sourceName = 'TradingView Chart Widget';
-            }
-          }
+        if (tvChart && Array.isArray(tvChart.data)) {
+          considerArray(tvChart.data, 'TradingView Chart Widget');
         }
       }
-    } catch (e) {}
+    } catch (e) { diagnostics.notes.push('TradingView adapter unavailable'); }
 
-    // Adapter 2: Highcharts accessible series
+    // Adapter 2: public Highcharts series.
     if (!raw) {
       try {
         if (window.Highcharts && Array.isArray(window.Highcharts.charts)) {
-          for (var h = 0; h < window.Highcharts.charts.length; h++) {
+          outer: for (var h = 0; h < window.Highcharts.charts.length; h++) {
             var hc = window.Highcharts.charts[h];
-            if (hc && Array.isArray(hc.series)) {
-              for (var s = 0; s < hc.series.length; s++) {
-                var sData = hc.series[s].data;
-                if (Array.isArray(sData) && sData.length >= 10) {
-                  var p0 = sData[0];
-                  if (p0 && (p0.open !== undefined || (Array.isArray(p0.options) && p0.options.length >= 4))) {
-                    raw = sData.map(function (pt) {
-                      if (Array.isArray(pt.options)) {
-                        return pt.options;
-                      }
-                      return {
-                        t: pt.x !== undefined ? pt.x : pt.time,
-                        o: pt.open,
-                        h: pt.high,
-                        l: pt.low,
-                        c: pt.close
-                      };
-                    });
-                    sourceName = 'Highcharts OHLC Series';
-                    break;
-                  }
-                }
-              }
+            if (!hc || !Array.isArray(hc.series)) continue;
+            for (var s = 0; s < hc.series.length; s++) {
+              var sData = hc.series[s] && hc.series[s].data;
+              if (!Array.isArray(sData) || sData.length < 5) continue;
+              var mapped = sData.map(function (pt) {
+                if (pt && pt.options && Array.isArray(pt.options)) return pt.options;
+                return {
+                  t: pt && (pt.x !== undefined ? pt.x : pt.time),
+                  o: pt && pt.open,
+                  h: pt && pt.high,
+                  l: pt && pt.low,
+                  c: pt && pt.close
+                };
+              });
+              if (considerArray(mapped, 'Highcharts OHLC Series')) break outer;
             }
-            if (raw) break;
           }
         }
-      } catch (e) {}
+      } catch (e) { diagnostics.notes.push('Highcharts adapter unavailable'); }
     }
 
-    // Adapter 3: Public Window Arrays legitimately exposed by charting libraries
+    // Adapter 3: known public window arrays.
     if (!raw) {
       var candidates = [
         'candles', 'quotes', 'chartData', 'historyCandles', 'activeCandles',
-        'currentQuotes', '_candles', 'rawCandles', 'bars', 'ohlcData', 'chartQuotes'
+        'currentQuotes', '_candles', 'rawCandles', 'bars', 'ohlcData', 'chartQuotes',
+        'klineData', 'ohlc', 'seriesData', 'priceData', 'historyData'
       ];
-      for (var i = 0; i < candidates.length; i++) {
+      for (var i = 0; i < candidates.length && !raw; i++) {
         var key = candidates[i];
-        if (window[key] && Array.isArray(window[key]) && window[key].length >= 10) {
-          var sample = window[key][0];
-          if (sample && (Array.isArray(sample) || typeof sample === 'object')) {
-            var hasOhlc = (sample.open !== undefined && sample.close !== undefined) ||
-                          (sample.o !== undefined && sample.c !== undefined) ||
-                          (Array.isArray(sample) && sample.length >= 5);
-            if (hasOhlc) {
-              raw = window[key];
-              sourceName = 'Window Array: ' + key;
-              break;
-            }
-          }
-        }
+        try {
+          if (window[key] && Array.isArray(window[key])) considerArray(window[key], 'Window Array: ' + key);
+        } catch (e) {}
       }
     }
 
-    return {
-      raw: raw,
-      source: sourceName
-    };
+    // Adapter 4: safe shallow discovery of directly exposed global arrays/objects.
+    // We inspect values only; we never call unknown functions, read private storage,
+    // intercept network traffic, or traverse arbitrary prototype chains.
+    if (!raw) {
+      try {
+        var keys = Object.keys(window);
+        var maxKeys = Math.min(keys.length, 1200);
+        for (var wi = 0; wi < maxKeys && !raw; wi++) {
+          var wk = keys[wi];
+          if (!wk || /password|token|auth|credential|cookie|storage|session/i.test(wk)) continue;
+          var val;
+          try { val = window[wk]; } catch (e) { continue; }
+          if (Array.isArray(val)) {
+            if (val.length >= 20 && considerArray(val, 'Window Exposed Array: ' + wk)) break;
+          } else if (val && typeof val === 'object') {
+            // Only inspect obvious public collection properties; no deep recursive walk.
+            var subNames = ['data','candles','bars','quotes','series','ohlc','kline','history'];
+            for (var si = 0; si < subNames.length && !raw; si++) {
+              var sub;
+              try { sub = val[subNames[si]]; } catch (e) { sub = null; }
+              if (Array.isArray(sub) && sub.length >= 20) {
+                if (considerArray(sub, 'Window Exposed Object: ' + wk + '.' + subNames[si])) break;
+              }
+            }
+          }
+        }
+      } catch (e) { diagnostics.notes.push('Safe global discovery unavailable'); }
+    }
+
+    if (!raw) diagnostics.notes.push('No directly exposed OHLC collection passed structural discovery.');
+    return { raw: raw, source: sourceName, diagnostics: diagnostics };
   }
 
   // Symbol Identification - Strict, No Guessing (document.title is forbidden)
@@ -174,8 +210,7 @@
       var selectors = [
         '.current-symbol', '.asset-select', '.header__asset-name', '.pairs-item.active',
         '.asset-name', '.active-asset', '.btn-symbol', '.open-chart-asset-name',
-        '[data-qa="current-asset"]', '.cq-symbol-select-btn', '.symbols-dropdown',
-        '[data-testid="ticker-name"]', '.symbol-name'
+        '[data-qa="current-asset"]', '.cq-symbol-select-btn', '.symbols-dropdown',        '[data-testid="ticker-name"]', '.symbol-name'
       ];
       for (var i = 0; i < selectors.length; i++) {
         var el = document.querySelector(selectors[i]);
@@ -394,9 +429,7 @@
       ema = (prices[j] * k) + (ema * (1 - k));
     }
     return ema;
-  }
-
-  function calculateWilderRSI(closes, period) {
+    }  function calculateWilderRSI(closes, period) {
     if (!closes || closes.length <= period) return null;
 
     var gains = [];
@@ -500,14 +533,19 @@
   function runMarketAnalysis() {
     var discovery = discoverMarketData();
     if (!discovery.raw) {
+      var noDataSymbol = identifySymbol();
+      var noDataTimeframe = identifyTimeframe(null);
+      var diagSuffix = discovery.diagnostics && discovery.diagnostics.notes.length
+        ? ' ' + discovery.diagnostics.notes[discovery.diagnostics.notes.length - 1]
+        : '';
       return {
         status: 'NO_DATA',
         signal: 'NO DATA / WAIT',
-        reason: 'No accessible OHLC candle stream detected on this webpage.',
+        reason: 'No directly exposed, structurally valid OHLC candle collection was found.' + diagSuffix,
         diagnostics: {
           dataSource: 'NONE DETECTED',
-          symbol: 'UNKNOWN',
-          timeframe: 'UNKNOWN',
+          symbol: noDataSymbol,
+          timeframe: noDataTimeframe,
           candleCount: 0,
           latestCandleTime: 'N/A',
           latestPrice: 'N/A',
@@ -595,8 +633,7 @@
           latestPrice: currentPrice.toFixed(5),
           dataFreshness: freshness.label,
           dataValidation: 'FAILED',
-          signalStatus: 'NO DATA / WAIT'
-        }
+          signalStatus: 'NO DATA / WAIT'        }
       };
     }
 
@@ -808,8 +845,7 @@
   panel.style.overflowY = 'auto';
   panel.style.backgroundColor = '#0A0F1D';
   panel.style.border = '1px solid #334155';
-  panel.style.borderRadius = '12px';
-  panel.style.boxShadow = '0 20px 40px rgba(0,0,0,0.85), 0 0 20px rgba(255,184,0,0.2)';
+  panel.style.borderRadius = '12px';  panel.style.boxShadow = '0 20px 40px rgba(0,0,0,0.85), 0 0 20px rgba(255,184,0,0.2)';
   panel.style.color = '#E2E8F0';
   panel.style.padding = '14px';
   panel.style.display = 'none';
@@ -823,7 +859,7 @@
         '<span style="font-size:18px;">🥭</span>' +
         '<div>' +
           '<div style="font-weight:900;font-size:12px;letter-spacing:0.8px;color:#FBBF24;">KHILJI MARKET ANALYZER</div>' +
-          '<div style="font-size:9px;color:#64748B;font-weight:bold;">MANGO BOT v3.0.0 PRO</div>' +
+          '<div style="font-size:9px;color:#64748B;font-weight:bold;">MANGO BOT v3.1.0 DIAGNOSTIC</div>' +
         '</div>' +
       '</div>' +
       '<button id="mango-close-btn" style="background:none;border:none;color:#94A3B8;cursor:pointer;font-size:16px;line-height:1;padding:4px;">✕</button>' +
@@ -1021,8 +1057,7 @@
       fSymbol.textContent = result.diagnostics ? result.diagnostics.symbol : 'UNKNOWN';
       fTimeframe.textContent = result.diagnostics ? result.diagnostics.timeframe : 'UNKNOWN';
       fPrice.textContent = '--';
-      fTime.textContent = '--';
-      fCount.textContent = '0';
+      fTime.textContent = '--';      fCount.textContent = '0';
       fTrend.textContent = 'NEUTRAL';
       fEma9.textContent = '--';
       fEma21.textContent = '--';
@@ -1226,8 +1261,8 @@
       panel.style.display = 'none';
     },
     scan: executeScan,
-    version: '3.0.0-PRO'
+    version: '3.1.0-DIAGNOSTIC'
   };
 
-  console.log('[MANGO BOT] KHILJI Market Analyzer v3.0.0 initialized. Ready on page.');
+  console.log('[MANGO BOT] KHILJI Market Analyzer v3.1.0 DIAGNOSTIC initialized. Ready on page.');
 })();
