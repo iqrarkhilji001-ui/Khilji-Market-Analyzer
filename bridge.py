@@ -49,7 +49,6 @@ def add_candles(data):
 
     for value in data.values():
         c = normalize_candle(value)
-
         if c:
             candles[c["time"]] = c
 
@@ -147,12 +146,6 @@ async def main():
 
     await load_history(client)
 
-    if len(candles) < 50:
-        logging.warning(
-            "Not enough candle data: %s",
-            len(candles)
-        )
-
     app = web.Application()
 
     app.router.add_get("/", root)
@@ -163,12 +156,7 @@ async def main():
     runner = web.AppRunner(app)
     await runner.setup()
 
-    site = web.TCPSite(
-        runner,
-        HOST,
-        PORT
-    )
-
+    site = web.TCPSite(runner, HOST, PORT)
     await site.start()
 
     logging.info(
@@ -179,7 +167,6 @@ async def main():
 
     try:
         await realtime_loop(client)
-
     finally:
         await client.close()
         await runner.cleanup()
