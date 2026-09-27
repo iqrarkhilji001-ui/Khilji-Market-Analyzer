@@ -2538,6 +2538,511 @@
           : null
     };
   }
+  /* ============================================================
+   PART 5/6 — ANALYSIS + SCORING + REPORT + SCAN
+   ============================================================ */
+
+  function formatNumber(v, decimals) {
+    if (v == null || !isFinite(Number(v))) return null;
+    return Number(v).toFixed(decimals == null ? 2 : decimals);
+  }
+
+
+  function analyzeMarket(candles) {
+    var result = {
+      ok: false,
+      signal: "WAIT",
+      bullScore: 0,
+      bearScore: 0,
+      indicators: null,
+      reasons: []
+    };
+
+    var gate = finalDataGate(candles, state.timeframe);
+
+    if (!gate.ok) {
+      result.reasons.push(
+        "DATA GATE: " +
+        gate.validation +
+        " / " +
+        gate.freshness
+      );
+      return result;
+    }
+
+    var indicators = calculateIndicators(candles);
+
+    if (!indicators) {
+      result.reasons.push("INDICATORS UNAVAILABLE");
+      return result;
+    }
+
+    result.indicators = indicators;
+
+    var bull = 0;
+    var bear = 0;
+    var reasons = [];
+
+    /* EMA structure */
+    if (
+      indicators.ema9 != null &&
+      indicators.ema21 != null &&
+      indicators.ema50 != null
+    ) {
+      if (
+        indicators.ema9 > indicators.ema21 &&
+        indicators.ema21 > indicators.ema50
+      ) {
+        bull += 25;
+        reasons.push("EMA bullish alignment");
+      } else if (
+        indicators.ema9 < indicators.ema21 &&
+        indicators.ema21 < indicators.ema50
+      ) {
+        bear += 25;
+        reasons.push("EMA bearish alignment");
+      } else {
+        reasons.push("EMA mixed");
+      }
+    }
+
+    /* Price vs EMA50 */
+    if (
+      indicators.price != null &&
+      indicators.ema50 != null
+    ) {
+      if (indicators.price > indicators.ema50) {
+        bull += 15;
+        reasons.push("Price above EMA50");
+      } else if (indicators.price < indicators.ema50) {
+        bear += 15;
+        reasons.push("Price below EMA50");
+      }
+    }
+
+    /* RSI */
+    if (indicators.rsi != null) {
+      if (
+        indicators.rsi >= 50 &&
+        indicators.rsi < 70
+      ) {
+        bull += 15;
+        reasons.push("RSI bullish zone");
+      } else if (
+        indicators.rsi <= 50 &&
+        indicators.rsi > 30
+      ) {
+        bear += 15;
+        reasons.push("RSI bearish zone");
+      } else if (indicators.rsi >= 70) {
+        reasons.push("RSI overbought");
+      } else if (indicators.rsi <= 30) {
+        reasons.push("RSI oversold");
+      } else {
+        reasons.push("RSI neutral");
+      }
+    }
+
+    /* MACD */
+    if (
+      indicators.macd &&
+      indicators.macd.line != null &&
+      indicators.macd.signal != null
+    ) {
+      if (
+        indicators.macd.line >
+        indicators.macd.signal &&
+        indicators.macd.histogram > 0
+      ) {
+        bull += 15;
+        reasons.push("MACD bullish");
+      } else if (
+        indicators.macd.line <
+        indicators.macd.signal &&
+        indicators.macd.histogram < 0
+      ) {
+        bear += 15;
+        reasons.push("MACD bearish");
+      } else {
+        reasons.push("MACD mixed");
+      }
+    }
+
+    /* Momentum */
+    if (indicators.momentum != null) {
+      if (indicators.momentum > 0) {
+        bull += 15;
+        reasons.push("Momentum positive");
+      } else if (indicators.momentum < 0) {
+        bear += 15;
+        reasons.push("Momentum negative");
+      } else {
+        reasons.push("Momentum flat");
+      }
+    }
+
+    /* Support / Resistance */
+    if (
+      indicators.support != null &&
+      indicators.resistance != null &&
+      indicators.price != null
+    ) {
+      var range =
+        indicators.resistance -
+        indicators.support;
+
+      if (range > 0) {
+        var position =
+          (indicators.price - indicators.support) /
+          range;
+
+        if (position <= 0.35) {
+          bull += 15;
+          reasons.push("Price near support");
+        } else if (position >= 0.65) {
+          bear += 15;
+          reasons.push("Price near resistance");
+        } else {
+          reasons.push("Price mid-range");
+        }
+      }
+    }
+
+    var signal = "WAIT";
+
+    if (
+      bull >= CFG.MIN_SCORE &&
+      bull >= bear + 15
+    ) {
+      signal = "UP";
+    } else if (
+      bear >= CFG.MIN_SCORE &&
+      bear >= bull + 15
+    ) {
+      signal = "DOWN";
+    } else {
+      reasons.push("Confirmation threshold not met");
+    }
+
+    result.ok = true;
+    result.signal = signal;
+    result.bullScore = bull;
+    result.bearScore = bear;
+    result.reasons = reasons;
+
+    return result;
+  }
+
+
+  function buildReport(item, analysis, gate) {
+    var candles =
+      item && item.candles
+        ? item.candles
+        : [];
+
+    var last =
+      candles.length
+        ? candles[candles.length - 1]
+        : null;
+
+    return {
+      source:
+        item
+          ? item.name
+          : state.source,
+
+      candleCount:
+        candles.length,
+
+      validation:
+        gate
+          ? gate.validation
+          : state.validation,
+
+      freshness:
+        gate
+          ? gate.freshness
+          : "NOT CHECKED",
+
+      latestCandleTime:
+        last
+          ? last.t
+          : null,
+
+      latestPrice:
+        last
+          ? last.c
+          : null,
+
+      analysis:
+        analysis || {
+          ok: false,
+          signal: "WAIT",
+          bullScore: 0,
+          bearScore: 0,
+          indicators: null,
+          reasons: []
+        },
+
+      inspected:
+        discovery.inspected,
+
+      candidates:
+        discovery.candidates,
+
+      rejected:
+        discovery.rejected
+    };
+  }
+
+
+  function runAnalysis(item) {
+    if (!item || !item.candles) {
+      state.signal = "WAIT";
+      state.bullScore = 0;
+      state.bearScore = 0;
+
+      return {
+        ok: false,
+        signal: "WAIT",
+        bullScore: 0,
+        bearScore: 0,
+        indicators: null,
+        reasons: [
+          "NO VALID PUBLIC CANDLE DATA"
+        ]
+      };
+    }
+
+    var gate =
+      finalDataGate(
+        item.candles,
+        state.timeframe
+      );
+
+    if (!gate.ok) {
+      state.signal = "WAIT";
+      state.bullScore = 0;
+      state.bearScore = 0;
+
+      return {
+        ok: false,
+        signal: "WAIT",
+        bullScore: 0,
+        bearScore: 0,
+        indicators: null,
+        reasons: [
+          "DATA GATE: " +
+          gate.validation +
+          " / " +
+          gate.freshness
+        ]
+      };
+    }
+
+    var analysis =
+      analyzeMarket(item.candles);
+
+    state.signal =
+      analysis.signal || "WAIT";
+
+    state.bullScore =
+      analysis.bullScore || 0;
+
+    state.bearScore =
+      analysis.bearScore || 0;
+
+    return analysis;
+  }
+
+
+  function scanMarket() {
+    if (state.scanning) {
+      return state.report;
+    }
+
+    state.scanning = true;
+    state.error = "";
+    state.signal = "WAIT";
+    state.bullScore = 0;
+    state.bearScore = 0;
+    state.candles = [];
+    state.lastPrice = null;
+    state.lastCandleTime = null;
+    state.source = "NONE DETECTED";
+    state.validation = "NOT SCANNED";
+    state.report = null;
+
+    try {
+      state.symbol = detectSymbol();
+      state.timeframe = detectTimeframe();
+
+      var item =
+        discoverPublicMarketData();
+
+      if (!item) {
+        var rejected =
+          state.report || {};
+
+        state.source =
+          rejected.bestRejectedSource ||
+          "NONE DETECTED";
+
+        state.validation =
+          rejected.validation
+            ? rejected.validation +
+              " | " +
+              (
+                rejected.freshness ||
+                "NOT CHECKED"
+              )
+            : "NO VALID CANDLE DATA";
+
+        state.signal =
+          "NO DATA / WAIT";
+
+        state.bullScore = 0;
+        state.bearScore = 0;
+
+        state.report =
+          Object.assign(
+            rejected,
+            {
+              analysis: {
+                ok: false,
+                signal: "NO DATA / WAIT",
+                bullScore: 0,
+                bearScore: 0,
+                indicators: null,
+                reasons: [
+                  "No public candle source passed validation and freshness checks"
+                ]
+              },
+
+              source: state.source,
+
+              candleCount:
+                rejected.candleCount || 0,
+
+              validation:
+                state.validation,
+
+              freshness:
+                rejected.freshness ||
+                "NOT CHECKED"
+            }
+          );
+
+        return state.report;
+      }
+
+      state.source =
+        item.name ||
+        "PUBLIC DATA";
+
+      state.candles =
+        item.candles || [];
+
+      state.lastPrice =
+        state.candles.length
+          ? state.candles[
+              state.candles.length - 1
+            ].c
+          : null;
+
+      state.lastCandleTime =
+        state.candles.length
+          ? state.candles[
+              state.candles.length - 1
+            ].t
+          : null;
+
+      var gate =
+        finalDataGate(
+          state.candles,
+          state.timeframe
+        );
+
+      state.validation =
+        gate.validation +
+        " | " +
+        gate.freshness;
+
+      if (!gate.ok) {
+        state.signal =
+          "NO DATA / WAIT";
+
+        state.report =
+          buildReport(
+            item,
+            {
+              ok: false,
+              signal: "NO DATA / WAIT",
+              bullScore: 0,
+              bearScore: 0,
+              indicators: null,
+              reasons: [
+                "Final data gate failed"
+              ]
+            },
+            gate
+          );
+
+        return state.report;
+      }
+
+      var analysis =
+        runAnalysis(item);
+
+      state.report =
+        buildReport(
+          item,
+          analysis,
+          gate
+        );
+
+      return state.report;
+
+    } catch (e) {
+      state.error =
+        e && e.message
+          ? e.message
+          : String(e);
+
+      state.signal =
+        "NO DATA / WAIT";
+
+      state.bullScore = 0;
+      state.bearScore = 0;
+
+      state.report = {
+        source: state.source,
+        candleCount:
+          state.candles.length,
+
+        validation:
+          state.validation,
+
+        freshness: "ERROR",
+
+        analysis: {
+          ok: false,
+          signal: "NO DATA / WAIT",
+          bullScore: 0,
+          bearScore: 0,
+          indicators: null,
+          reasons: [
+            "SCAN ERROR"
+          ]
+        }
+      };
+
+      return state.report;
+
+    } finally {
+      state.scanning = false;
+    }
+  }
 /* ============================================================
    PART 6/6 — MANGO UI + DIAGNOSTICS + INITIALIZATION
    ============================================================ */
