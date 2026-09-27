@@ -1,262 +1,182 @@
 /**
- * KHILJI MARKET ANALYZER — MANGO BOT v4.1.0
- * Production browser analyzer
+ * KHILJI MARKET ANALYZER - MANGO BOT v4.2.0
+ * Production JavaScript Engine
  *
- * REAL DATA ONLY
- * No fake/random candles
- * No trade execution
- * No private WebSocket interception
- * No auth/CORS bypass
+ * REAL MARKET DATA ONLY
+ * Bridge + Public Page Data
+ * NO FAKE / RANDOM / SIMULATED CANDLES
+ * NO TRADE EXECUTION
+ * UP / DOWN / WAIT ONLY
  */
 
 (function () {
-  "use strict";
+  'use strict';
 
-  if (window.__KHILJI_MANGO_V41__) {
-    try {
-      if (window.__KHILJI_MANGO_V41__.open) {
-        window.__KHILJI_MANGO_V41__.open();
-      }
-    } catch (e) {}
+  /* ============================================================
+     1. DUPLICATE GUARD
+     ============================================================ */
+
+  if (window.__MANGO_BOT_LOADED__) {
+    if (
+      window.__MANGO_BOT_INSTANCE__ &&
+      typeof window.__MANGO_BOT_INSTANCE__.show === 'function'
+    ) {
+      window.__MANGO_BOT_INSTANCE__.show();
+    }
     return;
   }
 
-  window.__KHILJI_MANGO_V41__ = {
-    version: "4.1.0",
-    open: null
+  window.__MANGO_BOT_LOADED__ = true;
+
+  /* ============================================================
+     2. CONFIG
+     ============================================================ */
+
+  var config = {
+    bridgeBase: 'http://127.0.0.1:8765',
+    emaShort: 9,
+    emaMedium: 21,
+    emaLong: 50,
+    rsiPeriod: 14,
+    rsiOverbought: 70,
+    rsiOversold: 30,
+    macdFast: 12,
+    macdSlow: 26,
+    macdSignal: 9,
+    momentumPeriod: 10,
+    srLookback: 20,
+    minScore: 70,
+    minCandles: 50
   };
 
-  var CFG = {
-    MIN_CANDLES: 50,
-    MAX_CANDLES: 300,
-    MAX_SCAN_DEPTH: 5,
-    MAX_ARRAY_ITEMS: 1000,
-
-    RSI_PERIOD: 14,
-    EMA_FAST: 9,
-    EMA_MID: 21,
-    EMA_SLOW: 50,
-
-    MACD_FAST: 12,
-    MACD_SLOW: 26,
-    MACD_SIGNAL: 9,
-
-    ROC_PERIOD: 10,
-    SR_PERIOD: 20,
-
-    MIN_SCORE: 70,
-
-    FRESHNESS_SECONDS: 180
-  };
+  /* ============================================================
+     3. STATE
+     ============================================================ */
 
   var state = {
+    source: 'NONE DETECTED',
+    symbol: 'UNKNOWN',
+    timeframe: 'UNKNOWN',
     candles: [],
-    source: "NONE DETECTED",
-    symbol: "UNKNOWN",
-    timeframe: "UNKNOWN",
-    lastPrice: null,
-    lastCandleTime: null,
-
-    signal: "WAIT",
-    bullScore: 0,
-    bearScore: 0,
-
-    validation: "NOT SCANNED",
-    error: "",
-
-    scanning: false,
-    report: null
+    bridge: false,
+    error: '',
+    result: null
   };
 
-  function num(v) {
-    if (typeof v === "number") {
-      return isFinite(v) ? v : null;
-    }
+  /* ============================================================
+     4. HELPERS
+     ============================================================ */
 
-    if (typeof v === "string") {
-      var s = v.replace(/,/g, "").trim();
-
-      if (s !== "" && isFinite(Number(s))) {
-        return Number(s);
-      }
-    }
-
-    return null;
+  function finiteNumber(v) {
+    var n = Number(v);
+    return isFinite(n) ? n : null;
   }
 
-  function first(obj, keys) {
-    if (!obj || typeof obj !== "object") {
+  function cleanSymbol(v) {
+    if (!v) return 'UNKNOWN';
+
+    return String(v)
+      .trim()
+      .toUpperCase()
+      .replace(/_/g, '/');
+  }
+
+  function periodToTimeframe(seconds) {
+    var n = Number(seconds);
+
+    if (!isFinite(n) || n <= 0) {
+      return 'UNKNOWN';
+    }
+
+    if (n < 60) return n + 's';
+    if (n % 3600 === 0) return (n / 3600) + 'h';
+    if (n % 60 === 0) return (n / 60) + 'm';
+
+    return n + 's';
+  }
+
+  function normalizeCandle(c) {
+    if (!c || typeof c !== 'object') {
       return null;
     }
 
-    for (var i = 0; i < keys.length; i++) {
-      if (
-        Object.prototype.hasOwnProperty.call(obj, keys[i]) &&
-        obj[keys[i]] != null
-      ) {
-        return obj[keys[i]];
-      }
-    }
+    var t =
+      c.timestamp !== undefined ? c.timestamp :
+      c.time !== undefined ? c.time :
+      c.t !== undefined ? c.t :
+      c.from !== undefined ? c.from :
+      null;
 
-    return null;
-  }
+    var o =
+      c.open !== undefined ? c.open :
+      c.o !== undefined ? c.o :
+      null;
 
-  function normalizeTime(v) {
-    var t = num(v);
+    var h =
+      c.high !== undefined ? c.high :
+      c.h !== undefined ? c.h :
+      null;
 
-    if (t == null) return null;
+    var l =
+      c.low !== undefined ? c.low :
+      c.l !== undefined ? c.l :
+      null;
 
-    /*
-     * Convert milliseconds → seconds.
-     */
-    if (t > 100000000000) {
-      t = t / 1000;
-    }
+    var cl =
+      c.close !== undefined ? c.close :
+      c.c !== undefined ? c.c :
+      null;
 
-    /*
-     * Reject obviously invalid timestamps.
-     */
-    if (t < 1000000000 || t > 5000000000) {
-      return null;
-    }
-
-    return t;
-  }
-
-  function normalizeCandle(x) {
-    if (!x) return null;
-
-    var t = null;
-    var o = null;
-    var h = null;
-    var l = null;
-    var c = null;
-
-    /*
-     * Array formats:
-     *
-     * [time, open, high, low, close]
-     *
-     * [open, high, low, close, time]
-     */
-
-    if (Array.isArray(x)) {
-      if (x.length >= 5) {
-
-        var a0 = normalizeTime(x[0]);
-        var a4 = normalizeTime(x[4]);
-
-        if (a0 != null) {
-          t = a0;
-          o = num(x[1]);
-          h = num(x[2]);
-          l = num(x[3]);
-          c = num(x[4]);
-        } else if (a4 != null) {
-          t = a4;
-          o = num(x[0]);
-          h = num(x[1]);
-          l = num(x[2]);
-          c = num(x[3]);
-        }
-
-        if (
-          t != null &&
-          o != null &&
-          h != null &&
-          l != null &&
-          c != null
-        ) {
-          return {
-            t: t,
-            o: o,
-            h: h,
-            l: l,
-            c: c
-          };
-        }
-      }
-
-      return null;
-    }
+    t = finiteNumber(t);
+    o = finiteNumber(o);
+    h = finiteNumber(h);
+    l = finiteNumber(l);
+    cl = finiteNumber(cl);
 
     if (
-      typeof x !== "object" &&
-      typeof x !== "function"
+      t === null ||
+      o === null ||
+      h === null ||
+      l === null ||
+      cl === null
     ) {
       return null;
     }
 
-    t = normalizeTime(
-      first(x, [
-        "t",
-        "time",
-        "timestamp",
-        "ts",
-        "date",
-        "datetime",
-        "start",
-        "startTime",
-        "timeStamp",
-        "x"
-      ])
-    );
-
-    o = num(
-      first(x, [
-        "o",
-        "open",
-        "Open",
-        "OPEN"
-      ])
-    );
-
-    h = num(
-      first(x, [
-        "h",
-        "high",
-        "High",
-        "HIGH"
-      ])
-    );
-
-    l = num(
-      first(x, [
-        "l",
-        "low",
-        "Low",
-        "LOW"
-      ])
-    );
-
-    c = num(
-      first(x, [
-        "c",
-        "close",
-        "Close",
-        "CLOSE",
-        "price",
-        "last"
-      ])
-    );
-
-    if (
-      t != null &&
-      o != null &&
-      h != null &&
-      l != null &&
-      c != null
-    ) {
-      return {
-        t: t,
-        o: o,
-        h: h,
-        l: l,
-        c: c
-      };
+    if (t < 100000000000) {
+      t = t * 1000;
     }
 
-    return null;
+    if (
+      o <= 0 ||
+      h <= 0 ||
+      l <= 0 ||
+      cl <= 0
+    ) {
+      return null;
+    }
+
+    if (
+      l > o ||
+      l > cl ||
+      h < o ||
+      h < cl ||
+      h < l
+    ) {
+      return null;
+    }
+
+    if (t > Date.now() + 60000) {
+      return null;
+    }
+
+    return {
+      timestamp: t,
+      open: o,
+      high: h,
+      low: l,
+      close: cl
+    };
   }
 
   function normalizeArray(arr) {
@@ -264,3463 +184,1273 @@
       return [];
     }
 
+    var map = {};
     var out = [];
 
-    var start = Math.max(
+    for (var i = 0; i < arr.length; i++) {
+      var c = normalizeCandle(arr[i]);
+
+      if (!c) continue;
+
+      if (!map[c.timestamp]) {
+        map[c.timestamp] = true;
+        out.push(c);
+      }
+    }
+
+    out.sort(function (a, b) {
+      return a.timestamp - b.timestamp;
+    });
+
+    return out;
+  }
+
+  /* ============================================================
+     5. PAGE SYMBOL / TIMEFRAME
+     ============================================================ */
+
+  function pageSymbol() {
+    try {
+      if (
+        window.tvWidget &&
+        typeof window.tvWidget.activeChart === 'function'
+      ) {
+        var chart = window.tvWidget.activeChart();
+
+        if (chart && typeof chart.symbol === 'function') {
+          var s = chart.symbol();
+
+          if (s) {
+            return cleanSymbol(s);
+          }
+        }
+      }
+    } catch (e) {}
+
+    var selectors = [
+      '.current-symbol',
+      '.asset-name',
+      '.active-asset',
+      '.pairs-item.active',
+      '[data-qa="current-asset"]',
+      '[data-testid="ticker-name"]',
+      '.symbol-name'
+    ];
+
+    for (var i = 0; i < selectors.length; i++) {
+      try {
+        var el = document.querySelector(selectors[i]);
+
+        if (el && el.textContent) {
+          var txt = el.textContent.trim();
+
+          var match = txt.match(
+            /[A-Z]{3}[\/_][A-Z]{3}|[A-Z]{6}|[A-Z]{3,6}_OTC/i
+          );
+
+          if (match) {
+            return cleanSymbol(match[0]);
+          }
+        }
+      } catch (e2) {}
+    }
+
+    try {
+      var q = new URLSearchParams(window.location.search);
+
+      var urlSymbol =
+        q.get('symbol') ||
+        q.get('pair') ||
+        q.get('asset');
+
+      if (urlSymbol) {
+        return cleanSymbol(urlSymbol);
+      }
+    } catch (e3) {}
+
+    return 'UNKNOWN';
+  }
+
+  function pageTimeframe() {
+    try {
+      if (
+        window.tvWidget &&
+        typeof window.tvWidget.activeChart === 'function'
+      ) {
+        var chart = window.tvWidget.activeChart();
+
+        if (chart && typeof chart.resolution === 'function') {
+          var r = chart.resolution();
+
+          if (r) {
+            return String(r);
+          }
+        }
+      }
+    } catch (e) {}
+
+    var selectors = [
+      '.timeframe-select .active',
+      '.time-frame-button.active',
+      '[data-timeframe].active',
+      '.timeframe-item.active',
+      '[data-period].active'
+    ];
+
+    for (var i = 0; i < selectors.length; i++) {
+      try {
+        var el = document.querySelector(selectors[i]);
+
+        if (el && el.textContent) {
+          var txt = el.textContent.trim();
+
+          if (/^\d+[smhdM]?$/i.test(txt)) {
+            return txt;
+          }
+        }
+      } catch (e2) {}
+    }
+
+    return 'UNKNOWN';
+  }
+
+  /* ============================================================
+     6. BRIDGE DATA
+     ============================================================ */
+
+  async function fetchBridgeStatus() {
+    try {
+      var response = await fetch(
+        config.bridgeBase + '/status?t=' + Date.now(),
+        {
+          method: 'GET',
+          cache: 'no-store'
+        }
+      );
+
+      if (!response.ok) {
+        return null;
+      }
+
+      var data = await response.json();
+
+      if (!data || data.ok !== true) {
+        return null;
+      }
+
+      return data;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  async function fetchBridgeCandles() {
+    try {
+      var response = await fetch(
+        config.bridgeBase + '/candles?t=' + Date.now(),
+        {
+          method: 'GET',
+          cache: 'no-store'
+        }
+      );
+
+      if (!response.ok) {
+        return null;
+      }
+
+      var data = await response.json();
+
+      if (!Array.isArray(data)) {
+        return null;
+      }
+
+      var candles = normalizeArray(data);
+
+      if (candles.length < config.minCandles) {
+        return null;
+      }
+
+      return candles;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  async function discoverBridge() {
+    var status = await fetchBridgeStatus();
+
+    if (!status) {
+      return null;
+    }
+
+    var candles = await fetchBridgeCandles();
+
+    if (!candles) {
+      return null;
+    }
+
+    return {
+      candles: candles,
+      asset: cleanSymbol(status.asset),
+      period: Number(status.period) || 0
+    };
+  }
+
+  /* ============================================================
+     7. PUBLIC PAGE DATA FALLBACK
+     ============================================================ */
+
+  function discoverPageCandles() {
+    var raw = null;
+    var source = 'NONE DETECTED';
+
+    try {
+      if (
+        window.tvWidget &&
+        typeof window.tvWidget.activeChart === 'function'
+      ) {
+        var chart = window.tvWidget.activeChart();
+
+        if (
+          chart &&
+          Array.isArray(chart.data) &&
+          chart.data.length >= config.minCandles
+        ) {
+          raw = chart.data;
+          source = 'TradingView Chart Widget';
+        }
+      }
+    } catch (e) {}
+
+    if (!raw) {
+      try {
+        if (
+          window.Highcharts &&
+          Array.isArray(window.Highcharts.charts)
+        ) {
+          for (
+            var i = 0;
+            i < window.Highcharts.charts.length;
+            i++
+          ) {
+            var hc = window.Highcharts.charts[i];
+
+            if (!hc || !Array.isArray(hc.series)) {
+              continue;
+            }
+
+            for (
+              var j = 0;
+              j < hc.series.length;
+              j++
+            ) {
+              var data = hc.series[j].data;
+
+              if (
+                Array.isArray(data) &&
+                data.length >= config.minCandles
+              ) {
+                raw = data.map(function (p) {
+                  return {
+                    time: p.x !== undefined ? p.x : p.time,
+                    open: p.open,
+                    high: p.high,
+                    low: p.low,
+                    close: p.close
+                  };
+                });
+
+                source = 'Highcharts OHLC';
+                break;
+              }
+            }
+
+            if (raw) break;
+          }
+        }
+      } catch (e2) {}
+    }
+
+    if (!raw) {
+      var names = [
+        'candles',
+        'quotes',
+        'chartData',
+        'historyCandles',
+        'activeCandles',
+        '_candles',
+        'rawCandles',
+        'bars',
+        'ohlcData',
+        'chartQuotes'
+      ];
+
+      for (var n = 0; n < names.length; n++) {
+        try {
+          var key = names[n];
+
+          if (
+            Array.isArray(window[key]) &&
+            window[key].length >= config.minCandles
+          ) {
+            raw = window[key];
+            source = 'Window Array: ' + key;
+            break;
+          }
+        } catch (e3) {}
+      }
+    }
+
+    if (!raw) {
+      return null;
+    }
+
+    var candles = normalizeArray(raw);
+
+    if (candles.length < config.minCandles) {
+      return null;
+    }
+
+    return {
+      candles: candles,
+      source: source
+    };
+  }
+
+  /* ============================================================
+     8. FRESHNESS
+     ============================================================ */
+
+  function freshness(timestamp, timeframe) {
+    if (!timestamp) {
+      return {
+        live: false,
+        label: 'NO DATA'
+      };
+    }
+
+    var diff = Math.max(
       0,
-      arr.length - CFG.MAX_ARRAY_ITEMS
+      Math.round((Date.now() - timestamp) / 1000)
     );
 
-    for (var i = start; i < arr.length; i++) {
-      var candle = normalizeCandle(arr[i]);
-
-      if (candle) {
-        out.push(candle);
-      }
-    }
-
-    return out;
-  }
-
-  function cleanCandles(candles) {
-    if (!Array.isArray(candles)) {
-      return [];
-    }
-
-    var map = {};
-
-    for (var i = 0; i < candles.length; i++) {
-      var c = candles[i];
-
-      if (!c || !isFinite(c.t)) {
-        continue;
-      }
-
-      map[String(c.t)] = c;
-    }
-
-    var out = Object.keys(map)
-      .sort(function (a, b) {
-        return Number(a) - Number(b);
-      })
-      .map(function (k) {
-        return map[k];
-      });
-
-    if (out.length > CFG.MAX_CANDLES) {
-      out = out.slice(
-        out.length - CFG.MAX_CANDLES
-      );
-    }
-
-    return out;
-  }
-/* ============================================================
-   PART 2/6 — CANDLE VALIDATION + FRESHNESS
-   ============================================================ */
-
-  function validateCandle(c) {
-    if (!c) return false;
+    var max = 180;
 
     if (
-      !isFinite(c.t) ||
-      !isFinite(c.o) ||
-      !isFinite(c.h) ||
-      !isFinite(c.l) ||
-      !isFinite(c.c)
+      timeframe === '5s' ||
+      timeframe === '10s' ||
+      timeframe === '15s'
     ) {
-      return false;
+      max = 45;
+    } else if (timeframe === '30s') {
+      max = 90;
+    } else if (timeframe === '5m') {
+      max = 600;
+    } else if (timeframe === '15m') {
+      max = 1800;
     }
 
-    if (
-      c.o <= 0 ||
-      c.h <= 0 ||
-      c.l <= 0 ||
-      c.c <= 0
-    ) {
-      return false;
-    }
-
-    /*
-     * Correct OHLC relationship:
-     *
-     * High must be >= Open and Close
-     * Low must be <= Open and Close
-     */
-    if (c.h < c.o) return false;
-    if (c.h < c.c) return false;
-    if (c.l > c.o) return false;
-    if (c.l > c.c) return false;
-
-    /*
-     * Candle timestamp cannot be in the future.
-     */
-    if (c.t > (Date.now() / 1000) + 120) {
-      return false;
-    }
-
-    return true;
-  }
-
-
-  function validateCandles(candles) {
-    var result = {
-      valid: false,
-      count: 0,
-      reason: ""
+    return {
+      live: diff <= max,
+      label:
+        diff <= max
+          ? 'LIVE (' + diff + 's ago)'
+          : 'STALE (' + diff + 's ago)'
     };
+  }
 
-    if (!Array.isArray(candles)) {
-      result.reason = "NOT AN ARRAY";
-      return result;
+  /* ============================================================
+     9. INDICATORS
+     ============================================================ */
+
+  function ema(values, period) {
+    if (!values || values.length < period) {
+      return null;
     }
 
-    if (candles.length < CFG.MIN_CANDLES) {
-      result.reason =
-        "INSUFFICIENT CANDLES (" +
-        candles.length +
-        "/" +
-        CFG.MIN_CANDLES +
-        ")";
-      return result;
+    var sum = 0;
+
+    for (var i = 0; i < period; i++) {
+      sum += values[i];
     }
 
-    var valid = [];
-    var bad = 0;
-    var duplicate = 0;
-    var lastT = 0;
+    var result = sum / period;
+    var k = 2 / (period + 1);
 
-    for (var i = 0; i < candles.length; i++) {
-      var c = candles[i];
-
-      if (!validateCandle(c)) {
-        bad++;
-        continue;
-      }
-
-      if (c.t === lastT) {
-        duplicate++;
-        continue;
-      }
-
-      if (lastT && c.t < lastT) {
-        bad++;
-        continue;
-      }
-
-      lastT = c.t;
-      valid.push(c);
+    for (var j = period; j < values.length; j++) {
+      result =
+        values[j] * k +
+        result * (1 - k);
     }
-
-    if (valid.length < CFG.MIN_CANDLES) {
-      result.count = valid.length;
-      result.reason =
-        "VALID CANDLES " +
-        valid.length +
-        "/" +
-        CFG.MIN_CANDLES;
-
-      return result;
-    }
-
-    /*
-     * Reject excessive corruption.
-     */
-    var totalBad = bad + duplicate;
-
-    if (
-      totalBad > 0 &&
-      totalBad / candles.length > 0.10
-    ) {
-      result.count = valid.length;
-      result.reason =
-        "DATA CORRUPTION > 10%";
-
-      return result;
-    }
-
-    result.valid = true;
-    result.count = valid.length;
-    result.reason = "VALID";
 
     return result;
   }
 
-
-  function timeframeSeconds(tf) {
-    if (!tf) return 60;
-
-    var s = String(tf)
-      .toLowerCase()
-      .replace(/\s+/g, "");
-
-    /*
-     * Seconds
-     */
-    if (/^\d+s$/.test(s)) {
-      return Number(s.replace("s", ""));
-    }
-
-    /*
-     * Minutes
-     */
-    if (/^\d+m$/.test(s)) {
-      return Number(s.replace("m", "")) * 60;
-    }
-
-    /*
-     * Hours
-     */
-    if (/^\d+h$/.test(s)) {
-      return Number(s.replace("h", "")) * 3600;
-    }
-
-    /*
-     * Common TradingView style:
-     * 1, 5, 15, 30, 60, 240
-     */
-    if (/^\d+$/.test(s)) {
-      return Number(s) * 60;
-    }
-
-    if (s === "1d" || s === "d") {
-      return 86400;
-    }
-
-    if (s === "1w" || s === "w") {
-      return 604800;
-    }
-
-    return 60;
-  }
-
-
-  function freshnessLimit(tf) {
-    var sec = timeframeSeconds(tf);
-
-    /*
-     * Allow enough time for the current candle to update.
-     */
-    var limit = Math.max(
-      CFG.FRESHNESS_SECONDS,
-      sec * 2
-    );
-
-    /*
-     * Short OTC/chart intervals.
-     */
-    if (sec <= 15) {
-      limit = 45;
-    } else if (sec <= 30) {
-      limit = 90;
-    } else if (sec <= 300) {
-      limit = 600;
-    } else if (sec <= 900) {
-      limit = 1800;
-    }
-
-    return limit;
-  }
-
-
-  function checkFreshness(candles, tf) {
-    if (!candles || !candles.length) {
-      return {
-        fresh: false,
-        age: null,
-        reason: "NO CANDLES"
-      };
-    }
-
-    var last = candles[candles.length - 1];
-
-    if (!last || !isFinite(last.t)) {
-      return {
-        fresh: false,
-        age: null,
-        reason: "INVALID LAST CANDLE"
-      };
-    }
-
-    var now = Date.now() / 1000;
-    var age = now - last.t;
-
-    /*
-     * Future timestamps are invalid.
-     */
-    if (age < -120) {
-      return {
-        fresh: false,
-        age: age,
-        reason: "FUTURE CANDLE"
-      };
-    }
-
-    var limit = freshnessLimit(tf);
-
-    if (age > limit) {
-      return {
-        fresh: false,
-        age: age,
-        reason:
-          "STALE (" +
-          Math.round(age) +
-          "s > " +
-          limit +
-          "s)"
-      };
-    }
-
-    return {
-      fresh: true,
-      age: age,
-      reason:
-        "FRESH (" +
-        Math.round(Math.max(0, age)) +
-        "s)"
-    };
-  }
-
-
-  function finalDataGate(candles, tf) {
-    var validation = validateCandles(candles);
-
-    if (!validation.valid) {
-      return {
-        ok: false,
-        validation: validation.reason,
-        freshness: "NOT CHECKED"
-      };
-    }
-
-    var freshness = checkFreshness(
-      candles,
-      tf
-    );
-
-    if (!freshness.fresh) {
-      return {
-        ok: false,
-        validation: "VALID",
-        freshness: freshness.reason
-      };
-    }
-
-    return {
-      ok: true,
-      validation: "VALID",
-      freshness: freshness.reason
-    };
-  }
-
-
-  function safeGet(obj, key) {
-    try {
-      if (!obj) return undefined;
-      return obj[key];
-    } catch (e) {
-      return undefined;
-    }
-  }
-
-
-  function looksLikeCandleArray(arr) {
-    if (!Array.isArray(arr)) {
-      return false;
-    }
-
-    if (arr.length < 5) {
-      return false;
-    }
-
-    /*
-     * Test a limited sample first.
-     */
-    var samples = Math.min(
-      arr.length,
-      12
-    );
-
-    var hits = 0;
-
-    for (var i = 0; i < samples; i++) {
-      if (normalizeCandle(arr[i])) {
-        hits++;
-      }
-    }
-
-    return hits >= Math.min(5, samples);
-  }
-
-
-  function candidateFromArray(arr, name) {
-    if (!looksLikeCandleArray(arr)) {
+  function rsi(values, period) {
+    if (!values || values.length <= period) {
       return null;
     }
 
-    var normalized = cleanCandles(
-      normalizeArray(arr)
-    );
+    var gain = 0;
+    var loss = 0;
 
-    if (normalized.length < CFG.MIN_CANDLES) {
-      return null;
-    }
+    for (var i = 1; i <= period; i++) {
+      var d = values[i] - values[i - 1];
 
-    var check = finalDataGate(
-      normalized,
-      state.timeframe
-    );
-
-    return {
-      name: name,
-      candles: normalized,
-      gate: check
-    };
-  }
-/* ============================================================
-   PART 3/6 — DEEP PUBLIC DATA DISCOVERY ENGINE
-   ============================================================ */
-
-  var discovery = {
-    inspected: 0,
-    candidates: 0,
-    rejected: 0,
-    notes: []
-  };
-
-
-  function note(msg) {
-    try {
-      if (discovery.notes.length < 80) {
-        discovery.notes.push(String(msg));
-      }
-    } catch (e) {}
-  }
-
-
-  function scoreCandidate(item) {
-    if (!item || !item.candles) return -1;
-
-    var score = item.candles.length;
-
-    if (
-      item.gate &&
-      item.gate.ok
-    ) {
-      score += 10000;
-    }
-
-    if (
-      item.name &&
-      /candle|ohlc|bar|quote|history/i.test(
-        item.name
-      )
-    ) {
-      score += 1000;
-    }
-
-    return score;
-  }
-
-
-  function safeKeys(obj) {
-    try {
-      return Object.keys(obj);
-    } catch (e) {
-      return [];
-    }
-  }
-
-
-  function findArraysDeep(
-    root,
-    path,
-    depth,
-    results,
-    seen
-  ) {
-    if (!root) return;
-
-    if (depth > CFG.MAX_SCAN_DEPTH) {
-      return;
-    }
-
-    if (
-      typeof root !== "object" &&
-      typeof root !== "function"
-    ) {
-      return;
-    }
-
-    try {
-      if (seen.indexOf(root) !== -1) {
-        return;
-      }
-
-      if (seen.length < 3000) {
-        seen.push(root);
-      }
-    } catch (e) {
-      return;
-    }
-
-    /*
-     * Direct array candidate.
-     */
-    if (Array.isArray(root)) {
-      var candidate = candidateFromArray(
-        root,
-        path
-      );
-
-      if (candidate) {
-        results.push(candidate);
-        discovery.candidates++;
-      }
-
-      /*
-       * Even if this array isn't directly candles,
-       * inspect nested arrays.
-       */
-      var max = Math.min(
-        root.length,
-        80
-      );
-
-      for (var i = 0; i < max; i++) {
-        var item = safeGet(root, i);
-
-        if (
-          item &&
-          typeof item === "object"
-        ) {
-          findArraysDeep(
-            item,
-            path + "[" + i + "]",
-            depth + 1,
-            results,
-            seen
-          );
-        }
-      }
-
-      return;
-    }
-
-    /*
-     * Object keys.
-     */
-    var keys = safeKeys(root);
-
-    if (keys.length > 250) {
-      keys = keys.slice(0, 250);
-    }
-
-    for (var k = 0; k < keys.length; k++) {
-      var key = keys[k];
-
-      /*
-       * Ignore obvious non-data/browser internals.
-       */
-      if (
-        key === "document" ||
-        key === "location" ||
-        key === "frames" ||
-        key === "parent" ||
-        key === "top" ||
-        key === "window" ||
-        key === "self" ||
-        key === "chrome" ||
-        key === "webkitStorageInfo"
-      ) {
-        continue;
-      }
-
-      var value = safeGet(
-        root,
-        key
-      );
-
-      if (
-        value == null ||
-        typeof value === "string" ||
-        typeof value === "number" ||
-        typeof value === "boolean"
-      ) {
-        continue;
-      }
-
-      var childPath =
-        path + "." + key;
-
-      /*
-       * Prioritize names which commonly contain
-       * market/candle data.
-       */
-      if (
-        /candle|ohlc|bar|quote|history|price|series|market|chart|data|result|payload|items/i
-          .test(key)
-      ) {
-        findArraysDeep(
-          value,
-          childPath,
-          depth + 1,
-          results,
-          seen
-        );
-      } else if (depth < 2) {
-        findArraysDeep(
-          value,
-          childPath,
-          depth + 1,
-          results,
-          seen
-        );
-      }
-    }
-  }
-
-
-  function discoverTradingView(results) {
-    try {
-      if (
-        window.tvWidget &&
-        typeof window.tvWidget.activeChart ===
-          "function"
-      ) {
-        var chart =
-          window.tvWidget.activeChart();
-
-        /*
-         * Symbol.
-         */
-        try {
-          if (
-            chart &&
-            typeof chart.symbol === "function"
-          ) {
-            var sym = chart.symbol();
-
-            if (sym) {
-              state.symbol = String(sym);
-            }
-          }
-        } catch (e) {}
-
-        /*
-         * Timeframe / resolution.
-         */
-        try {
-          if (
-            chart &&
-            typeof chart.resolution ===
-              "function"
-          ) {
-            var res =
-              chart.resolution();
-
-            if (res) {
-              state.timeframe =
-                String(res);
-            }
-          }
-        } catch (e) {}
-
-        /*
-         * Public chart data.
-         */
-        try {
-          if (
-            chart &&
-            typeof chart.data ===
-              "function"
-          ) {
-            var data = chart.data();
-
-            var c =
-              candidateFromArray(
-                data,
-                "TradingView.activeChart().data()"
-              );
-
-            if (c) {
-              results.push(c);
-            } else {
-              note(
-                "TradingView chart.data() found but rejected"
-              );
-            }
-          }
-        } catch (e) {
-          note(
-            "TradingView data() unavailable"
-          );
-        }
-      }
-    } catch (e) {
-      note(
-        "TradingView discovery error"
-      );
-    }
-  }
-
-
-  function discoverHighcharts(results) {
-    try {
-      if (
-        !window.Highcharts ||
-        !Array.isArray(
-          window.Highcharts.charts
-        )
-      ) {
-        return;
-      }
-
-      for (
-        var i = 0;
-        i < window.Highcharts.charts.length;
-        i++
-      ) {
-        var chart =
-          window.Highcharts.charts[i];
-
-        if (!chart || !chart.series) {
-          continue;
-        }
-
-        for (
-          var s = 0;
-          s < chart.series.length;
-          s++
-        ) {
-          var series =
-            chart.series[s];
-
-          if (!series || !series.points) {
-            continue;
-          }
-
-          var arr = [];
-
-          for (
-            var p = 0;
-            p < series.points.length;
-            p++
-          ) {
-            var point =
-              series.points[p];
-
-            if (!point) continue;
-
-            /*
-             * Highcharts OHLC-style points.
-             */
-            var candle = normalizeCandle({
-              time:
-                point.x,
-              open:
-                point.open,
-              high:
-                point.high,
-              low:
-                point.low,
-              close:
-                point.close
-            });
-
-            if (candle) {
-              arr.push(candle);
-            }
-          }
-
-          if (
-            arr.length >=
-            CFG.MIN_CANDLES
-          ) {
-            var cleaned =
-              cleanCandles(arr);
-
-            var gate =
-              finalDataGate(
-                cleaned,
-                state.timeframe
-              );
-
-            results.push({
-              name:
-                "Highcharts[" +
-                i +
-                "].series[" +
-                s +
-                "]",
-              candles: cleaned,
-              gate: gate
-            });
-          }
-        }
-      }
-    } catch (e) {
-      note(
-        "Highcharts discovery error"
-      );
-    }
-  }
-
-
-  function discoverKnownRoots(results) {
-    var names = [
-      "__INITIAL_STATE__",
-      "__NEXT_DATA__",
-      "__PRELOADED_STATE__",
-      "appState",
-      "marketState",
-      "chartState",
-      "store",
-      "state",
-      "market",
-      "chart",
-      "candles",
-      "bars",
-      "ohlc",
-      "quotes",
-      "history",
-      "priceHistory",
-      "chartData",
-      "historyCandles",
-      "activeCandles",
-      "rawCandles",
-      "ohlcData"
-    ];
-
-    for (
-      var i = 0;
-      i < names.length;
-      i++
-    ) {
-      var name = names[i];
-
-      var root =
-        safeGet(
-          window,
-          name
-        );
-
-      if (root == null) {
-        continue;
-      }
-
-      discovery.inspected++;
-
-      /*
-       * Direct array first.
-       */
-      var direct =
-        candidateFromArray(
-          root,
-          "window." + name
-        );
-
-      if (direct) {
-        results.push(direct);
-        continue;
-      }
-
-      /*
-       * Then bounded recursive search.
-       */
-      findArraysDeep(
-        root,
-        "window." + name,
-        0,
-        results,
-        []
-      );
-    }
-  }
-
-
-  function discoverWindowObjects(results) {
-    var keys = [];
-
-    try {
-      keys = Object.keys(window);
-    } catch (e) {
-      return;
-    }
-
-    /*
-     * Only inspect likely public market-related
-     * globals to avoid an expensive full-page walk.
-     */
-    var checked = 0;
-
-    for (
-      var i = 0;
-      i < keys.length;
-      i++
-    ) {
-      var key = keys[i];
-
-      if (
-        !/candle|ohlc|bar|quote|history|market|chart|price|series|ticker/i
-          .test(key)
-      ) {
-        continue;
-      }
-
-      if (checked >= 100) {
-        break;
-      }
-
-      checked++;
-
-      var value =
-        safeGet(
-          window,
-          key
-        );
-
-      if (value == null) {
-        continue;
-      }
-
-      discovery.inspected++;
-
-      var direct =
-        candidateFromArray(
-          value,
-          "window." + key
-        );
-
-      if (direct) {
-        results.push(direct);
+      if (d > 0) {
+        gain += d;
       } else {
-        findArraysDeep(
-          value,
-          "window." + key,
-          0,
-          results,
-          []
-        );
+        loss += Math.abs(d);
       }
     }
+
+    var avgGain = gain / period;
+    var avgLoss = loss / period;
+
+    for (var j = period + 1; j < values.length; j++) {
+      var change = values[j] - values[j - 1];
+
+      var g = change > 0 ? change : 0;
+      var l = change < 0 ? Math.abs(change) : 0;
+
+      avgGain =
+        ((avgGain * (period - 1)) + g) /
+        period;
+
+      avgLoss =
+        ((avgLoss * (period - 1)) + l) /
+        period;
+    }
+
+    if (avgLoss === 0) {
+      return 100;
+    }
+
+    var rs = avgGain / avgLoss;
+
+    return 100 - (100 / (1 + rs));
   }
 
-
-  function discoverDOMData(results) {
-    var selectors = [
-      "[data-candles]",
-      "[data-ohlc]",
-      "[data-bars]",
-      "[data-quotes]",
-      "[data-chart-data]",
-      "[data-history]"
-    ];
-
-    for (
-      var i = 0;
-      i < selectors.length;
-      i++
+  function macd(values) {
+    if (
+      !values ||
+      values.length <
+        config.macdSlow + config.macdSignal
     ) {
-      var nodes = [];
-
-      try {
-        nodes =
-          document.querySelectorAll(
-            selectors[i]
-          );
-      } catch (e) {
-        continue;
-      }
-
-      for (
-        var n = 0;
-        n < nodes.length;
-        n++
-      ) {
-        var el = nodes[n];
-
-        var attrs = [
-          "data-candles",
-          "data-ohlc",
-          "data-bars",
-          "data-quotes",
-          "data-chart-data",
-          "data-history"
-        ];
-
-        for (
-          var a = 0;
-          a < attrs.length;
-          a++
-        ) {
-          var raw =
-            el.getAttribute(
-              attrs[a]
-            );
-
-          if (!raw) continue;
-
-          try {
-            var parsed =
-              JSON.parse(raw);
-
-            var candidate =
-              candidateFromArray(
-                parsed,
-                "DOM " +
-                  selectors[i]
-              );
-
-            if (candidate) {
-              results.push(
-                candidate
-              );
-            }
-          } catch (e) {}
-        }
-      }
-    }
-  }
-
-
-  function discoverPublicMarketData() {
-    discovery.inspected = 0;
-    discovery.candidates = 0;
-    discovery.rejected = 0;
-    discovery.notes = [];
-
-    var results = [];
-
-    /*
-     * Most specific sources first.
-     */
-    discoverTradingView(results);
-
-    discoverHighcharts(results);
-
-    discoverKnownRoots(results);
-
-    discoverWindowObjects(results);
-
-    discoverDOMData(results);
-
-    if (!results.length) {
-      note(
-        "NO VALID PUBLIC CANDLE ARRAY FOUND"
-      );
       return null;
     }
 
-    /*
-     * Highest-quality candidate first.
-     */
-    results.sort(function (a, b) {
-      return (
-        scoreCandidate(b) -
-        scoreCandidate(a)
+    var fast = [];
+    var slow = [];
+
+    var kFast =
+      2 / (config.macdFast + 1);
+
+    var kSlow =
+      2 / (config.macdSlow + 1);
+
+    var fastEma = values[0];
+    var slowEma = values[0];
+
+    for (var i = 1; i < values.length; i++) {
+      fastEma =
+        values[i] * kFast +
+        fastEma * (1 - kFast);
+
+      slowEma =
+        values[i] * kSlow +
+        slowEma * (1 - kSlow);
+
+      if (i >= config.macdSlow - 1) {
+        fast.push(fastEma);
+        slow.push(slowEma);
+      }
+    }
+
+    var lines = [];
+
+    for (var j = 0; j < fast.length; j++) {
+      lines.push(fast[j] - slow[j]);
+    }
+
+    if (lines.length < config.macdSignal) {
+      return null;
+    }
+
+    var signal =
+      lines
+        .slice(0, config.macdSignal)
+        .reduce(function (a, b) {
+          return a + b;
+        }, 0) /
+      config.macdSignal;
+
+    var kSignal =
+      2 / (config.macdSignal + 1);
+
+    for (
+      var x = config.macdSignal;
+      x < lines.length;
+      x++
+    ) {
+      signal =
+        lines[x] * kSignal +
+        signal * (1 - kSignal);
+    }
+
+    var line =
+      lines[lines.length - 1];
+
+    return {
+      line: line,
+      signal: signal,
+      histogram: line - signal
+    };
+  }
+
+  function momentum(values, period) {
+    if (!values || values.length <= period) {
+      return null;
+    }
+
+    var old =
+      values[values.length - 1 - period];
+
+    var current =
+      values[values.length - 1];
+
+    if (!old) {
+      return null;
+    }
+
+    return ((current / old) - 1) * 100;
+  }
+
+  function supportResistance(candles) {
+    if (
+      !candles ||
+      candles.length < config.srLookback
+    ) {
+      return null;
+    }
+
+    var slice = candles.slice(
+      candles.length - config.srLookback
+    );
+
+    var support = Infinity;
+    var resistance = -Infinity;
+
+    for (var i = 0; i < slice.length; i++) {
+      support = Math.min(
+        support,
+        slice[i].low
       );
+
+      resistance = Math.max(
+        resistance,
+        slice[i].high
+      );
+    }
+
+    return {
+      support: support,
+      resistance: resistance
+    };
+  }
+
+  /* ============================================================
+     10. ANALYSIS
+     ============================================================ */
+
+  function analyze(candles, symbol, timeframe, source) {
+    var latest =
+      candles[candles.length - 1];
+
+    var closes = candles.map(function (c) {
+      return c.close;
     });
 
-    /*
-     * Select only a candidate that passes
-     * the complete data gate.
-     */
-    for (
-      var i = 0;
-      i < results.length;
-      i++
-    ) {
-      var item = results[i];
+    var live = freshness(
+      latest.timestamp,
+      timeframe
+    );
 
-      if (
-        item &&
-        item.gate &&
-        item.gate.ok &&
-        item.candles &&
-        item.candles.length >=
-          CFG.MIN_CANDLES
-      ) {
-        return item;
-      }
-
-      discovery.rejected++;
-    }
-
-    /*
-     * Keep the strongest rejected candidate
-     * for diagnostics.
-     */
-    var best = results[0];
-
-    if (best) {
-      state.report = {
-        bestRejectedSource:
-          best.name,
-        candleCount:
-          best.candles
-            ? best.candles.length
-            : 0,
-        validation:
-          best.gate
-            ? best.gate.validation
-            : "UNKNOWN",
-        freshness:
-          best.gate
-            ? best.gate.freshness
-            : "UNKNOWN",
-        inspected:
-          discovery.inspected,
-        candidates:
-          discovery.candidates,
-        rejected:
-          discovery.rejected
+    if (!live.live) {
+      return {
+        status: 'WAIT',
+        signal: 'NO DATA / WAIT',
+        reason: 'Candle data is stale.',
+        source: source,
+        symbol: symbol,
+        timeframe: timeframe,
+        candleCount: candles.length,
+        latest: latest,
+        freshness: live.label
       };
     }
 
-    return null;
-  }
-/* ============================================================
-   PART 4/6 — SYMBOL + TIMEFRAME + INDICATORS
-   ============================================================ */
-
-  function detectSymbol() {
-    var found = "";
-
-    try {
-      if (
-        window.tvWidget &&
-        typeof window.tvWidget.activeChart ===
-          "function"
-      ) {
-        var ch =
-          window.tvWidget.activeChart();
-
-        if (
-          ch &&
-          typeof ch.symbol === "function"
-        ) {
-          found = ch.symbol();
-        }
-      }
-    } catch (e) {}
-
-    if (!found) {
-      var selectors = [
-        "[data-symbol]",
-        "[data-pair]",
-        "[data-ticker]",
-        "[data-asset]",
-        "[data-instrument]",
-        ".current-symbol",
-        ".symbol-name",
-        ".asset-select"
-      ];
-
-      for (
-        var i = 0;
-        i < selectors.length;
-        i++
-      ) {
-        try {
-          var el =
-            document.querySelector(
-              selectors[i]
-            );
-
-          if (el) {
-            found =
-              el.getAttribute("data-symbol") ||
-              el.getAttribute("data-pair") ||
-              el.getAttribute("data-ticker") ||
-              el.getAttribute("data-asset") ||
-              el.getAttribute("data-instrument") ||
-              el.textContent.trim();
-
-            if (found) break;
-          }
-        } catch (e) {}
-      }
-    }
-
-    if (!found) {
-      try {
-        var params =
-          new URLSearchParams(
-            location.search
-          );
-
-        found =
-          params.get("symbol") ||
-          params.get("pair") ||
-          params.get("asset") ||
-          params.get("ticker") ||
-          "";
-      } catch (e) {}
-    }
-
-    if (!found) {
-      try {
-        var txt =
-          document.body.innerText
-            .slice(0, 12000);
-
-        var m =
-          txt.match(
-            /\b([A-Z]{3,10})[\/\-]([A-Z]{3,10})\b/
-          );
-
-        if (m) {
-          found =
-            m[1] + "/" + m[2];
-        }
-      } catch (e) {}
-    }
-
-    return found
-      ? String(found)
-      : "UNKNOWN";
-  }
-
-
-  function detectTimeframe() {
-    var found = "";
-
-    try {
-      if (
-        window.tvWidget &&
-        typeof window.tvWidget.activeChart ===
-          "function"
-      ) {
-        var ch =
-          window.tvWidget.activeChart();
-
-        if (
-          ch &&
-          typeof ch.resolution ===
-            "function"
-        ) {
-          found = ch.resolution();
-        }
-      }
-    } catch (e) {}
-
-    if (!found) {
-      var selectors = [
-        "[data-timeframe]",
-        "[data-interval]",
-        "[data-period]",
-        ".timeframe.active",
-        ".interval.active"
-      ];
-
-      for (
-        var i = 0;
-        i < selectors.length;
-        i++
-      ) {
-        try {
-          var el =
-            document.querySelector(
-              selectors[i]
-            );
-
-          if (el) {
-            found =
-              el.getAttribute(
-                "data-timeframe"
-              ) ||
-              el.getAttribute(
-                "data-interval"
-              ) ||
-              el.getAttribute(
-                "data-period"
-              ) ||
-              el.textContent.trim();
-
-            if (found) break;
-          }
-        } catch (e) {}
-      }
-    }
-
-    if (!found) {
-      try {
-        var params =
-          new URLSearchParams(
-            location.search
-          );
-
-        found =
-          params.get("timeframe") ||
-          params.get("interval") ||
-          params.get("period") ||
-          "";
-      } catch (e) {}
-    }
-
-    return found
-      ? String(found)
-      : "UNKNOWN";
-  }
-
-
-  function ema(values, period) {
     if (
-      !Array.isArray(values) ||
-      values.length < period
+      symbol === 'UNKNOWN' ||
+      timeframe === 'UNKNOWN'
     ) {
-      return null;
+      return {
+        status: 'WAIT',
+        signal: 'NO DATA / WAIT',
+        reason: 'Symbol or timeframe could not be verified.',
+        source: source,
+        symbol: symbol,
+        timeframe: timeframe,
+        candleCount: candles.length,
+        latest: latest,
+        freshness: live.label
+      };
     }
 
-    var k =
-      2 / (period + 1);
+    var ema9 = ema(
+      closes,
+      config.emaShort
+    );
 
-    var sum = 0;
+    var ema21 = ema(
+      closes,
+      config.emaMedium
+    );
 
-    for (
-      var i = 0;
-      i < period;
-      i++
-    ) {
-      sum += values[i];
-    }
+    var ema50 = ema(
+      closes,
+      config.emaLong
+    );
 
-    var prev =
-      sum / period;
+    var r = rsi(
+      closes,
+      config.rsiPeriod
+    );
 
-    for (
-      var j = period;
-      j < values.length;
-      j++
-    ) {
-      prev =
-        values[j] * k +
-        prev * (1 - k);
-    }
+    var m = macd(closes);
 
-    return prev;
-  }
+    var mom = momentum(
+      closes,
+      config.momentumPeriod
+    );
 
-
-  function emaSeries(values, period) {
-    var out = [];
+    var sr = supportResistance(
+      candles
+    );
 
     if (
-      !Array.isArray(values) ||
-      values.length < period
+      ema9 === null ||
+      ema21 === null ||
+      ema50 === null ||
+      r === null ||
+      !m ||
+      mom === null ||
+      !sr
     ) {
-      return out;
+      return {
+        status: 'WAIT',
+        signal: 'NO DATA / WAIT',
+        reason: 'Insufficient data for indicators.',
+        source: source,
+        symbol: symbol,
+        timeframe: timeframe,
+        candleCount: candles.length,
+        latest: latest,
+        freshness: live.label
+      };
     }
-
-    var sum = 0;
-
-    for (
-      var i = 0;
-      i < period;
-      i++
-    ) {
-      sum += values[i];
-    }
-
-    var prev =
-      sum / period;
-
-    out.push(prev);
-
-    var k =
-      2 / (period + 1);
-
-    for (
-      var j = period;
-      j < values.length;
-      j++
-    ) {
-      prev =
-        values[j] * k +
-        prev * (1 - k);
-
-      out.push(prev);
-    }
-
-    return out;
-  }
-
-
-  function rsi(values, period) {
-    if (
-      !Array.isArray(values) ||
-      values.length <= period
-    ) {
-      return null;
-    }
-
-    var gain = 0;
-    var loss = 0;
-
-    for (
-      var i = 1;
-      i <= period;
-      i++
-    ) {
-      var d =
-        values[i] -
-        values[i - 1];
-
-      if (d >= 0) {
-        gain += d;
-      } else {
-        loss -= d;
-      }
-    }
-
-    var avgGain =
-      gain / period;
-
-    var avgLoss =
-      loss / period;
-
-    for (
-      var j = period + 1;
-      j < values.length;
-      j++
-    ) {
-      var diff =
-        values[j] -
-        values[j - 1];
-
-      var g =
-        diff > 0
-          ? diff
-          : 0;
-
-      var l =
-        diff < 0
-          ? -diff
-          : 0;
-
-      avgGain =
-        (
-          avgGain *
-            (period - 1) +
-          g
-        ) / period;
-
-      avgLoss =
-        (
-          avgLoss *
-            (period - 1) +
-          l
-        ) / period;
-    }
-
-    if (avgLoss === 0) {
-      return 100;
-    }
-
-    var rs =
-      avgGain / avgLoss;
-
-    return 100 -
-      100 / (1 + rs);
-  }
-
-
-  function macd(values) {
-    var fast =
-      emaSeries(
-        values,
-        CFG.MACD_FAST
-      );
-
-    var slow =
-      emaSeries(
-        values,
-        CFG.MACD_SLOW
-      );
-
-    if (!fast.length || !slow.length) {
-      return null;
-    }
-
-    /*
-     * Align the fast EMA with slow EMA.
-     */
-    var offset =
-      CFG.MACD_SLOW -
-      CFG.MACD_FAST;
-
-    var line = [];
-
-    for (
-      var i = 0;
-      i < slow.length;
-      i++
-    ) {
-      var fi =
-        i + offset;
-
-      if (
-        fi >= 0 &&
-        fi < fast.length
-      ) {
-        line.push(
-          fast[fi] -
-          slow[i]
-        );
-      }
-    }
-
-    if (
-      line.length <
-      CFG.MACD_SIGNAL
-    ) {
-      return null;
-    }
-
-    var signal =
-      ema(
-        line,
-        CFG.MACD_SIGNAL
-      );
-
-    var latest =
-      line[line.length - 1];
-
-    return {
-      line: latest,
-      signal: signal,
-      histogram:
-        latest - signal
-    };
-  }
-
-
-  function roc(values, period) {
-    if (
-      !Array.isArray(values) ||
-      values.length <= period
-    ) {
-      return null;
-    }
-
-    var current =
-      values[values.length - 1];
-
-    var previous =
-      values[
-        values.length - 1 - period
-      ];
-
-    if (
-      !isFinite(current) ||
-      !isFinite(previous) ||
-      previous === 0
-    ) {
-      return null;
-    }
-
-    return (
-      (current - previous) /
-      previous
-    ) * 100;
-  }
-
-
-  function supportResistance(candles) {
-    if (
-      !candles ||
-      candles.length < CFG.SR_PERIOD
-    ) {
-      return null;
-    }
-
-    var start =
-      Math.max(
-        0,
-        candles.length -
-          CFG.SR_PERIOD
-      );
-
-    var support =
-      Infinity;
-
-    var resistance =
-      -Infinity;
-
-    for (
-      var i = start;
-      i < candles.length;
-      i++
-    ) {
-      var c = candles[i];
-
-      if (c.l < support) {
-        support = c.l;
-      }
-
-      if (c.h > resistance) {
-        resistance = c.h;
-      }
-    }
-
-    if (
-      !isFinite(support) ||
-      !isFinite(resistance)
-    ) {
-      return null;
-    }
-
-    return {
-      support: support,
-      resistance: resistance
-    };
-  }
-
-
-  function calculateIndicators(candles) {
-    if (
-      !candles ||
-      candles.length <
-        CFG.MIN_CANDLES
-    ) {
-      return null;
-    }
-
-    var closes =
-      candles.map(function (c) {
-        return c.c;
-      });
-
-    var e9 =
-      ema(
-        closes,
-        CFG.EMA_FAST
-      );
-
-    var e21 =
-      ema(
-        closes,
-        CFG.EMA_MID
-      );
-
-    var e50 =
-      ema(
-        closes,
-        CFG.EMA_SLOW
-      );
-
-    var r =
-      rsi(
-        closes,
-        CFG.RSI_PERIOD
-      );
-
-    var m =
-      macd(closes);
-
-    var momentum =
-      roc(
-        closes,
-        CFG.ROC_PERIOD
-      );
-
-    var sr =
-      supportResistance(
-        candles
-      );
-
-    return {
-      price:
-        closes[
-          closes.length - 1
-        ],
-
-      ema9: e9,
-      ema21: e21,
-      ema50: e50,
-
-      rsi: r,
-
-      macd:
-        m,
-
-      momentum:
-        momentum,
-
-      support:
-        sr
-          ? sr.support
-          : null,
-
-      resistance:
-        sr
-          ? sr.resistance
-          : null
-    };
-  }
-/* ============================================================
-   PART 4/6 — SYMBOL + TIMEFRAME + INDICATORS
-   ============================================================ */
-
-  function detectSymbol() {
-    var found = "";
-
-    try {
-      if (
-        window.tvWidget &&
-        typeof window.tvWidget.activeChart ===
-          "function"
-      ) {
-        var ch =
-          window.tvWidget.activeChart();
-
-        if (
-          ch &&
-          typeof ch.symbol === "function"
-        ) {
-          found = ch.symbol();
-        }
-      }
-    } catch (e) {}
-
-    if (!found) {
-      var selectors = [
-        "[data-symbol]",
-        "[data-pair]",
-        "[data-ticker]",
-        "[data-asset]",
-        "[data-instrument]",
-        ".current-symbol",
-        ".symbol-name",
-        ".asset-select"
-      ];
-
-      for (
-        var i = 0;
-        i < selectors.length;
-        i++
-      ) {
-        try {
-          var el =
-            document.querySelector(
-              selectors[i]
-            );
-
-          if (el) {
-            found =
-              el.getAttribute("data-symbol") ||
-              el.getAttribute("data-pair") ||
-              el.getAttribute("data-ticker") ||
-              el.getAttribute("data-asset") ||
-              el.getAttribute("data-instrument") ||
-              el.textContent.trim();
-
-            if (found) break;
-          }
-        } catch (e) {}
-      }
-    }
-
-    if (!found) {
-      try {
-        var params =
-          new URLSearchParams(
-            location.search
-          );
-
-        found =
-          params.get("symbol") ||
-          params.get("pair") ||
-          params.get("asset") ||
-          params.get("ticker") ||
-          "";
-      } catch (e) {}
-    }
-
-    if (!found) {
-      try {
-        var txt =
-          document.body.innerText
-            .slice(0, 12000);
-
-        var m =
-          txt.match(
-            /\b([A-Z]{3,10})[\/\-]([A-Z]{3,10})\b/
-          );
-
-        if (m) {
-          found =
-            m[1] + "/" + m[2];
-        }
-      } catch (e) {}
-    }
-
-    return found
-      ? String(found)
-      : "UNKNOWN";
-  }
-
-
-  function detectTimeframe() {
-    var found = "";
-
-    try {
-      if (
-        window.tvWidget &&
-        typeof window.tvWidget.activeChart ===
-          "function"
-      ) {
-        var ch =
-          window.tvWidget.activeChart();
-
-        if (
-          ch &&
-          typeof ch.resolution ===
-            "function"
-        ) {
-          found = ch.resolution();
-        }
-      }
-    } catch (e) {}
-
-    if (!found) {
-      var selectors = [
-        "[data-timeframe]",
-        "[data-interval]",
-        "[data-period]",
-        ".timeframe.active",
-        ".interval.active"
-      ];
-
-      for (
-        var i = 0;
-        i < selectors.length;
-        i++
-      ) {
-        try {
-          var el =
-            document.querySelector(
-              selectors[i]
-            );
-
-          if (el) {
-            found =
-              el.getAttribute(
-                "data-timeframe"
-              ) ||
-              el.getAttribute(
-                "data-interval"
-              ) ||
-              el.getAttribute(
-                "data-period"
-              ) ||
-              el.textContent.trim();
-
-            if (found) break;
-          }
-        } catch (e) {}
-      }
-    }
-
-    if (!found) {
-      try {
-        var params =
-          new URLSearchParams(
-            location.search
-          );
-
-        found =
-          params.get("timeframe") ||
-          params.get("interval") ||
-          params.get("period") ||
-          "";
-      } catch (e) {}
-    }
-
-    return found
-      ? String(found)
-      : "UNKNOWN";
-  }
-
-
-  function ema(values, period) {
-    if (
-      !Array.isArray(values) ||
-      values.length < period
-    ) {
-      return null;
-    }
-
-    var k =
-      2 / (period + 1);
-
-    var sum = 0;
-
-    for (
-      var i = 0;
-      i < period;
-      i++
-    ) {
-      sum += values[i];
-    }
-
-    var prev =
-      sum / period;
-
-    for (
-      var j = period;
-      j < values.length;
-      j++
-    ) {
-      prev =
-        values[j] * k +
-        prev * (1 - k);
-    }
-
-    return prev;
-  }
-
-
-  function emaSeries(values, period) {
-    var out = [];
-
-    if (
-      !Array.isArray(values) ||
-      values.length < period
-    ) {
-      return out;
-    }
-
-    var sum = 0;
-
-    for (
-      var i = 0;
-      i < period;
-      i++
-    ) {
-      sum += values[i];
-    }
-
-    var prev =
-      sum / period;
-
-    out.push(prev);
-
-    var k =
-      2 / (period + 1);
-
-    for (
-      var j = period;
-      j < values.length;
-      j++
-    ) {
-      prev =
-        values[j] * k +
-        prev * (1 - k);
-
-      out.push(prev);
-    }
-
-    return out;
-  }
-
-
-  function rsi(values, period) {
-    if (
-      !Array.isArray(values) ||
-      values.length <= period
-    ) {
-      return null;
-    }
-
-    var gain = 0;
-    var loss = 0;
-
-    for (
-      var i = 1;
-      i <= period;
-      i++
-    ) {
-      var d =
-        values[i] -
-        values[i - 1];
-
-      if (d >= 0) {
-        gain += d;
-      } else {
-        loss -= d;
-      }
-    }
-
-    var avgGain =
-      gain / period;
-
-    var avgLoss =
-      loss / period;
-
-    for (
-      var j = period + 1;
-      j < values.length;
-      j++
-    ) {
-      var diff =
-        values[j] -
-        values[j - 1];
-
-      var g =
-        diff > 0
-          ? diff
-          : 0;
-
-      var l =
-        diff < 0
-          ? -diff
-          : 0;
-
-      avgGain =
-        (
-          avgGain *
-            (period - 1) +
-          g
-        ) / period;
-
-      avgLoss =
-        (
-          avgLoss *
-            (period - 1) +
-          l
-        ) / period;
-    }
-
-    if (avgLoss === 0) {
-      return 100;
-    }
-
-    var rs =
-      avgGain / avgLoss;
-
-    return 100 -
-      100 / (1 + rs);
-  }
-
-
-  function macd(values) {
-    var fast =
-      emaSeries(
-        values,
-        CFG.MACD_FAST
-      );
-
-    var slow =
-      emaSeries(
-        values,
-        CFG.MACD_SLOW
-      );
-
-    if (!fast.length || !slow.length) {
-      return null;
-    }
-
-    /*
-     * Align the fast EMA with slow EMA.
-     */
-    var offset =
-      CFG.MACD_SLOW -
-      CFG.MACD_FAST;
-
-    var line = [];
-
-    for (
-      var i = 0;
-      i < slow.length;
-      i++
-    ) {
-      var fi =
-        i + offset;
-
-      if (
-        fi >= 0 &&
-        fi < fast.length
-      ) {
-        line.push(
-          fast[fi] -
-          slow[i]
-        );
-      }
-    }
-
-    if (
-      line.length <
-      CFG.MACD_SIGNAL
-    ) {
-      return null;
-    }
-
-    var signal =
-      ema(
-        line,
-        CFG.MACD_SIGNAL
-      );
-
-    var latest =
-      line[line.length - 1];
-
-    return {
-      line: latest,
-      signal: signal,
-      histogram:
-        latest - signal
-    };
-  }
-
-
-  function roc(values, period) {
-    if (
-      !Array.isArray(values) ||
-      values.length <= period
-    ) {
-      return null;
-    }
-
-    var current =
-      values[values.length - 1];
-
-    var previous =
-      values[
-        values.length - 1 - period
-      ];
-
-    if (
-      !isFinite(current) ||
-      !isFinite(previous) ||
-      previous === 0
-    ) {
-      return null;
-    }
-
-    return (
-      (current - previous) /
-      previous
-    ) * 100;
-  }
-
-
-  function supportResistance(candles) {
-    if (
-      !candles ||
-      candles.length < CFG.SR_PERIOD
-    ) {
-      return null;
-    }
-
-    var start =
-      Math.max(
-        0,
-        candles.length -
-          CFG.SR_PERIOD
-      );
-
-    var support =
-      Infinity;
-
-    var resistance =
-      -Infinity;
-
-    for (
-      var i = start;
-      i < candles.length;
-      i++
-    ) {
-      var c = candles[i];
-
-      if (c.l < support) {
-        support = c.l;
-      }
-
-      if (c.h > resistance) {
-        resistance = c.h;
-      }
-    }
-
-    if (
-      !isFinite(support) ||
-      !isFinite(resistance)
-    ) {
-      return null;
-    }
-
-    return {
-      support: support,
-      resistance: resistance
-    };
-  }
-
-
-  function calculateIndicators(candles) {
-    if (
-      !candles ||
-      candles.length <
-        CFG.MIN_CANDLES
-    ) {
-      return null;
-    }
-
-    var closes =
-      candles.map(function (c) {
-        return c.c;
-      });
-
-    var e9 =
-      ema(
-        closes,
-        CFG.EMA_FAST
-      );
-
-    var e21 =
-      ema(
-        closes,
-        CFG.EMA_MID
-      );
-
-    var e50 =
-      ema(
-        closes,
-        CFG.EMA_SLOW
-      );
-
-    var r =
-      rsi(
-        closes,
-        CFG.RSI_PERIOD
-      );
-
-    var m =
-      macd(closes);
-
-    var momentum =
-      roc(
-        closes,
-        CFG.ROC_PERIOD
-      );
-
-    var sr =
-      supportResistance(
-        candles
-      );
-
-    return {
-      price:
-        closes[
-          closes.length - 1
-        ],
-
-      ema9: e9,
-      ema21: e21,
-      ema50: e50,
-
-      rsi: r,
-
-      macd:
-        m,
-
-      momentum:
-        momentum,
-
-      support:
-        sr
-          ? sr.support
-          : null,
-
-      resistance:
-        sr
-          ? sr.resistance
-          : null
-    };
-  }
-  /* ============================================================
-   PART 5/6 — ANALYSIS + SCORING + REPORT + SCAN
-   ============================================================ */
-
-  function formatNumber(v, decimals) {
-    if (v == null || !isFinite(Number(v))) return null;
-    return Number(v).toFixed(decimals == null ? 2 : decimals);
-  }
-
-
-  function analyzeMarket(candles) {
-    var result = {
-      ok: false,
-      signal: "WAIT",
-      bullScore: 0,
-      bearScore: 0,
-      indicators: null,
-      reasons: []
-    };
-
-    var gate = finalDataGate(candles, state.timeframe);
-
-    if (!gate.ok) {
-      result.reasons.push(
-        "DATA GATE: " +
-        gate.validation +
-        " / " +
-        gate.freshness
-      );
-      return result;
-    }
-
-    var indicators = calculateIndicators(candles);
-
-    if (!indicators) {
-      result.reasons.push("INDICATORS UNAVAILABLE");
-      return result;
-    }
-
-    result.indicators = indicators;
 
     var bull = 0;
     var bear = 0;
+
     var reasons = [];
 
-    /* EMA structure */
+    /* EMA */
     if (
-      indicators.ema9 != null &&
-      indicators.ema21 != null &&
-      indicators.ema50 != null
+      ema9 > ema21 &&
+      ema21 > ema50
     ) {
-      if (
-        indicators.ema9 > indicators.ema21 &&
-        indicators.ema21 > indicators.ema50
-      ) {
-        bull += 25;
-        reasons.push("EMA bullish alignment");
-      } else if (
-        indicators.ema9 < indicators.ema21 &&
-        indicators.ema21 < indicators.ema50
-      ) {
-        bear += 25;
-        reasons.push("EMA bearish alignment");
-      } else {
-        reasons.push("EMA mixed");
-      }
+      bull += 25;
+      reasons.push('EMA bullish alignment');
+    } else if (
+      ema9 < ema21 &&
+      ema21 < ema50
+    ) {
+      bear += 25;
+      reasons.push('EMA bearish alignment');
     }
 
-    /* Price vs EMA50 */
-    if (
-      indicators.price != null &&
-      indicators.ema50 != null
-    ) {
-      if (indicators.price > indicators.ema50) {
-        bull += 15;
-        reasons.push("Price above EMA50");
-      } else if (indicators.price < indicators.ema50) {
-        bear += 15;
-        reasons.push("Price below EMA50");
-      }
+    /* Price / EMA50 */
+    if (latest.close > ema50) {
+      bull += 10;
+    } else if (latest.close < ema50) {
+      bear += 10;
     }
 
     /* RSI */
-    if (indicators.rsi != null) {
-      if (
-        indicators.rsi >= 50 &&
-        indicators.rsi < 70
-      ) {
-        bull += 15;
-        reasons.push("RSI bullish zone");
-      } else if (
-        indicators.rsi <= 50 &&
-        indicators.rsi > 30
-      ) {
-        bear += 15;
-        reasons.push("RSI bearish zone");
-      } else if (indicators.rsi >= 70) {
-        reasons.push("RSI overbought");
-      } else if (indicators.rsi <= 30) {
-        reasons.push("RSI oversold");
-      } else {
-        reasons.push("RSI neutral");
-      }
+    if (
+      r >= 50 &&
+      r < config.rsiOverbought
+    ) {
+      bull += 15;
+      reasons.push('RSI bullish');
+    } else if (
+      r <= 50 &&
+      r > config.rsiOversold
+    ) {
+      bear += 15;
+      reasons.push('RSI bearish');
     }
 
     /* MACD */
     if (
-      indicators.macd &&
-      indicators.macd.line != null &&
-      indicators.macd.signal != null
+      m.line > m.signal &&
+      m.histogram > 0
     ) {
-      if (
-        indicators.macd.line >
-        indicators.macd.signal &&
-        indicators.macd.histogram > 0
-      ) {
-        bull += 15;
-        reasons.push("MACD bullish");
-      } else if (
-        indicators.macd.line <
-        indicators.macd.signal &&
-        indicators.macd.histogram < 0
-      ) {
-        bear += 15;
-        reasons.push("MACD bearish");
-      } else {
-        reasons.push("MACD mixed");
-      }
+      bull += 20;
+      reasons.push('MACD bullish');
+    } else if (
+      m.line < m.signal &&
+      m.histogram < 0
+    ) {
+      bear += 20;
+      reasons.push('MACD bearish');
     }
 
     /* Momentum */
-    if (indicators.momentum != null) {
-      if (indicators.momentum > 0) {
+    if (mom > 0) {
+      bull += 15;
+      reasons.push('Momentum positive');
+    } else if (mom < 0) {
+      bear += 15;
+      reasons.push('Momentum negative');
+    }
+
+    /* S/R */
+    var range =
+      sr.resistance - sr.support;
+
+    if (range > 0) {
+      var position =
+        (latest.close - sr.support) /
+        range;
+
+      if (position <= 0.25) {
         bull += 15;
-        reasons.push("Momentum positive");
-      } else if (indicators.momentum < 0) {
+        reasons.push('Price near support');
+      } else if (position >= 0.75) {
         bear += 15;
-        reasons.push("Momentum negative");
-      } else {
-        reasons.push("Momentum flat");
+        reasons.push('Price near resistance');
       }
     }
 
-    /* Support / Resistance */
-    if (
-      indicators.support != null &&
-      indicators.resistance != null &&
-      indicators.price != null
-    ) {
-      var range =
-        indicators.resistance -
-        indicators.support;
-
-      if (range > 0) {
-        var position =
-          (indicators.price - indicators.support) /
-          range;
-
-        if (position <= 0.35) {
-          bull += 15;
-          reasons.push("Price near support");
-        } else if (position >= 0.65) {
-          bear += 15;
-          reasons.push("Price near resistance");
-        } else {
-          reasons.push("Price mid-range");
-        }
-      }
-    }
-
-    var signal = "WAIT";
+    var signal = 'WAIT';
 
     if (
-      bull >= CFG.MIN_SCORE &&
-      bull >= bear + 15
+      bull >= config.minScore &&
+      bull > bear
     ) {
-      signal = "UP";
-    } else if (
-      bear >= CFG.MIN_SCORE &&
-      bear >= bull + 15
-    ) {
-      signal = "DOWN";
-    } else {
-      reasons.push("Confirmation threshold not met");
+      signal = 'UP';
     }
 
-    result.ok = true;
-    result.signal = signal;
-    result.bullScore = bull;
-    result.bearScore = bear;
-    result.reasons = reasons;
+    if (
+      bear >= config.minScore &&
+      bear > bull
+    ) {
+      signal = 'DOWN';
+    }
 
-    return result;
-  }
+    /* Severe contradiction => WAIT */
+    if (
+      signal === 'UP' &&
+      (
+        m.histogram < 0 ||
+        mom < -0.15
+      )
+    ) {
+      signal = 'WAIT';
+      reasons.push('Major bullish contradiction');
+    }
 
-
-  function buildReport(item, analysis, gate) {
-    var candles =
-      item && item.candles
-        ? item.candles
-        : [];
-
-    var last =
-      candles.length
-        ? candles[candles.length - 1]
-        : null;
+    if (
+      signal === 'DOWN' &&
+      (
+        m.histogram > 0 ||
+        mom > 0.15
+      )
+    ) {
+      signal = 'WAIT';
+      reasons.push('Major bearish contradiction');
+    }
 
     return {
-      source:
-        item
-          ? item.name
-          : state.source,
-
-      candleCount:
-        candles.length,
-
-      validation:
-        gate
-          ? gate.validation
-          : state.validation,
-
-      freshness:
-        gate
-          ? gate.freshness
-          : "NOT CHECKED",
-
-      latestCandleTime:
-        last
-          ? last.t
-          : null,
-
-      latestPrice:
-        last
-          ? last.c
-          : null,
-
-      analysis:
-        analysis || {
-          ok: false,
-          signal: "WAIT",
-          bullScore: 0,
-          bearScore: 0,
-          indicators: null,
-          reasons: []
-        },
-
-      inspected:
-        discovery.inspected,
-
-      candidates:
-        discovery.candidates,
-
-      rejected:
-        discovery.rejected
+      status: 'OK',
+      signal: signal,
+      source: source,
+      symbol: symbol,
+      timeframe: timeframe,
+      candleCount: candles.length,
+      latest: latest,
+      freshness: live.label,
+      score: Math.max(bull, bear),
+      bullScore: bull,
+      bearScore: bear,
+      ema9: ema9,
+      ema21: ema21,
+      ema50: ema50,
+      rsi: r,
+      macd: m.line,
+      macdSignal: m.signal,
+      macdHistogram: m.histogram,
+      momentum: mom,
+      support: sr.support,
+      resistance: sr.resistance,
+      reasons: reasons
     };
   }
 
-
-  function runAnalysis(item) {
-    if (!item || !item.candles) {
-      state.signal = "WAIT";
-      state.bullScore = 0;
-      state.bearScore = 0;
-
-      return {
-        ok: false,
-        signal: "WAIT",
-        bullScore: 0,
-        bearScore: 0,
-        indicators: null,
-        reasons: [
-          "NO VALID PUBLIC CANDLE DATA"
-        ]
-      };
-    }
-
-    var gate =
-      finalDataGate(
-        item.candles,
-        state.timeframe
-      );
-
-    if (!gate.ok) {
-      state.signal = "WAIT";
-      state.bullScore = 0;
-      state.bearScore = 0;
-
-      return {
-        ok: false,
-        signal: "WAIT",
-        bullScore: 0,
-        bearScore: 0,
-        indicators: null,
-        reasons: [
-          "DATA GATE: " +
-          gate.validation +
-          " / " +
-          gate.freshness
-        ]
-      };
-    }
-
-    var analysis =
-      analyzeMarket(item.candles);
-
-    state.signal =
-      analysis.signal || "WAIT";
-
-    state.bullScore =
-      analysis.bullScore || 0;
-
-    state.bearScore =
-      analysis.bearScore || 0;
-
-    return analysis;
-  }
-
-
-  function scanMarket() {
-    if (state.scanning) {
-      return state.report;
-    }
-
-    state.scanning = true;
-    state.error = "";
-    state.signal = "WAIT";
-    state.bullScore = 0;
-    state.bearScore = 0;
-    state.candles = [];
-    state.lastPrice = null;
-    state.lastCandleTime = null;
-    state.source = "NONE DETECTED";
-    state.validation = "NOT SCANNED";
-    state.report = null;
-
-    try {
-      state.symbol = detectSymbol();
-      state.timeframe = detectTimeframe();
-
-      var item =
-        discoverPublicMarketData();
-
-      if (!item) {
-        var rejected =
-          state.report || {};
-
-        state.source =
-          rejected.bestRejectedSource ||
-          "NONE DETECTED";
-
-        state.validation =
-          rejected.validation
-            ? rejected.validation +
-              " | " +
-              (
-                rejected.freshness ||
-                "NOT CHECKED"
-              )
-            : "NO VALID CANDLE DATA";
-
-        state.signal =
-          "NO DATA / WAIT";
-
-        state.bullScore = 0;
-        state.bearScore = 0;
-
-        state.report =
-          Object.assign(
-            rejected,
-            {
-              analysis: {
-                ok: false,
-                signal: "NO DATA / WAIT",
-                bullScore: 0,
-                bearScore: 0,
-                indicators: null,
-                reasons: [
-                  "No public candle source passed validation and freshness checks"
-                ]
-              },
-
-              source: state.source,
-
-              candleCount:
-                rejected.candleCount || 0,
-
-              validation:
-                state.validation,
-
-              freshness:
-                rejected.freshness ||
-                "NOT CHECKED"
-            }
-          );
-
-        return state.report;
-      }
-
-      state.source =
-        item.name ||
-        "PUBLIC DATA";
-
-      state.candles =
-        item.candles || [];
-
-      state.lastPrice =
-        state.candles.length
-          ? state.candles[
-              state.candles.length - 1
-            ].c
-          : null;
-
-      state.lastCandleTime =
-        state.candles.length
-          ? state.candles[
-              state.candles.length - 1
-            ].t
-          : null;
-
-      var gate =
-        finalDataGate(
-          state.candles,
-          state.timeframe
-        );
-
-      state.validation =
-        gate.validation +
-        " | " +
-        gate.freshness;
-
-      if (!gate.ok) {
-        state.signal =
-          "NO DATA / WAIT";
-
-        state.report =
-          buildReport(
-            item,
-            {
-              ok: false,
-              signal: "NO DATA / WAIT",
-              bullScore: 0,
-              bearScore: 0,
-              indicators: null,
-              reasons: [
-                "Final data gate failed"
-              ]
-            },
-            gate
-          );
-
-        return state.report;
-      }
-
-      var analysis =
-        runAnalysis(item);
-
-      state.report =
-        buildReport(
-          item,
-          analysis,
-          gate
-        );
-
-      return state.report;
-
-    } catch (e) {
-      state.error =
-        e && e.message
-          ? e.message
-          : String(e);
-
-      state.signal =
-        "NO DATA / WAIT";
-
-      state.bullScore = 0;
-      state.bearScore = 0;
-
-      state.report = {
-        source: state.source,
-        candleCount:
-          state.candles.length,
-
-        validation:
-          state.validation,
-
-        freshness: "ERROR",
-
-        analysis: {
-          ok: false,
-          signal: "NO DATA / WAIT",
-          bullScore: 0,
-          bearScore: 0,
-          indicators: null,
-          reasons: [
-            "SCAN ERROR"
-          ]
-        }
-      };
-
-      return state.report;
-
-    } finally {
-      state.scanning = false;
-    }
-  }
-/* ============================================================
-   PART 6/6 — MANGO UI + DIAGNOSTICS + INITIALIZATION
-   ============================================================ */
-
-  function esc(v) {
-    return String(v == null ? "" : v)
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;");
-  }
-
-
-  function uiValue(v) {
-    return v == null || v === ""
-      ? "--"
-      : esc(v);
-  }
-
-
-  function renderPanel() {
-    if (!state.panel) return;
-
-    var ind =
-      state.report &&
-      state.report.analysis &&
-      state.report.analysis.indicators;
-
-    var reasons =
-      state.report &&
-      state.report.analysis &&
-      state.report.analysis.reasons
-        ? state.report.analysis.reasons
-        : [];
-
-    var report =
-      state.report || {};
-
-    var freshness =
-      report.freshness ||
-      (
-        state.validation.indexOf("|") >= 0
-          ? state.validation.split("|")[1].trim()
-          : "--"
-      );
-
-    state.panel.innerHTML =
-
-      '<div style="font-size:18px;font-weight:800;margin-bottom:8px;">' +
-        'MANGO BOT <span style="font-size:11px;">v4.1</span>' +
-      '</div>' +
-
-      '<div style="font-size:11px;line-height:1.55;">' +
-
-        '<b>DATA SOURCE:</b> ' +
-        uiValue(state.source) +
-        '<br>' +
-
-        '<b>SYMBOL:</b> ' +
-        uiValue(state.symbol) +
-        '<br>' +
-
-        '<b>TIMEFRAME:</b> ' +
-        uiValue(state.timeframe) +
-        '<br>' +
-
-        '<b>CANDLES:</b> ' +
-        uiValue(state.candles.length) +
-        '<br>' +
-
-        '<b>LATEST PRICE:</b> ' +
-        uiValue(
-          state.lastPrice != null
-            ? formatNumber(state.lastPrice, 5)
-            : null
-        ) +
-        '<br>' +
-
-        '<b>VALIDATION:</b> ' +
-        uiValue(state.validation) +
-        '<br>' +
-
-        '<b>FRESHNESS:</b> ' +
-        uiValue(freshness) +
-
-      '</div>' +
-
-      '<hr style="border:0;border-top:1px solid #333;margin:9px 0;">' +
-
-      '<div style="font-size:12px;">' +
-
-        '<b>EMA 9:</b> ' +
-        uiValue(
-          ind ? formatNumber(ind.ema9, 5) : null
-        ) +
-        '<br>' +
-
-        '<b>EMA 21:</b> ' +
-        uiValue(
-          ind ? formatNumber(ind.ema21, 5) : null
-        ) +
-        '<br>' +
-
-        '<b>EMA 50:</b> ' +
-        uiValue(
-          ind ? formatNumber(ind.ema50, 5) : null
-        ) +
-        '<br>' +
-
-        '<b>RSI:</b> ' +
-        uiValue(
-          ind ? formatNumber(ind.rsi, 2) : null
-        ) +
-        '<br>' +
-
-        '<b>MACD:</b> ' +
-        uiValue(
-          ind && ind.macd
-            ? formatNumber(ind.macd.line, 5)
-            : null
-        ) +
-        '<br>' +
-
-        '<b>MACD HIST:</b> ' +
-        uiValue(
-          ind && ind.macd
-            ? formatNumber(ind.macd.histogram, 5)
-            : null
-        ) +
-        '<br>' +
-
-        '<b>MOMENTUM:</b> ' +
-        uiValue(
-          ind
-            ? formatNumber(ind.momentum, 2) + "%"
-            : null
-        ) +
-        '<br>' +
-
-        '<b>SUPPORT:</b> ' +
-        uiValue(
-          ind
-            ? formatNumber(ind.support, 5)
-            : null
-        ) +
-        '<br>' +
-
-        '<b>RESISTANCE:</b> ' +
-        uiValue(
-          ind
-            ? formatNumber(ind.resistance, 5)
-            : null
-        ) +
-
-      '</div>' +
-
-      '<hr style="border:0;border-top:1px solid #333;margin:9px 0;">' +
-
-      '<div style="font-size:13px;font-weight:800;">' +
-        'BULL SCORE: ' +
-        esc(state.bullScore) +
-        ' / 100' +
-        '<br>' +
-        'BEAR SCORE: ' +
-        esc(state.bearScore) +
-        ' / 100' +
-      '</div>' +
-
-      '<div style="margin-top:8px;padding:9px;border:1px solid #555;border-radius:8px;text-align:center;font-size:18px;font-weight:900;">' +
-        esc(state.signal) +
-      '</div>' +
-
-      '<div style="font-size:10px;margin-top:7px;color:#aaa;">' +
-        (
-          reasons.length
-            ? reasons.slice(0, 8).map(esc).join(" • ")
-            : "No confirmation data"
-        ) +
-      '</div>' +
-
-      '<div style="display:flex;gap:6px;margin-top:10px;">' +
-
-        '<button id="mango-scan" style="flex:1;padding:8px;border:0;border-radius:6px;cursor:pointer;">' +
-          'SCAN AGAIN' +
-        '</button>' +
-
-        '<button id="mango-report" style="flex:1;padding:8px;border:0;border-radius:6px;cursor:pointer;">' +
-          'REPORT' +
-        '</button>' +
-
-      '</div>' +
-
-      '<button id="mango-close" style="width:100%;margin-top:6px;padding:7px;border:0;border-radius:6px;cursor:pointer;">' +
-        'CLOSE' +
-      '</button>';
-
-    /*
-     * Use event listeners instead of inline handlers.
-     */
-    var scanBtn =
-      document.getElementById(
-        "mango-scan"
-      );
-
-    var reportBtn =
-      document.getElementById(
-        "mango-report"
-      );
-
-    var closeBtn =
-      document.getElementById(
-        "mango-close"
-      );
-
-    if (scanBtn) {
-      scanBtn.addEventListener(
-        "click",
-        function (e) {
-          e.stopPropagation();
-
-          scanMarket();
-          renderPanel();
-        }
-      );
-    }
-
-    if (reportBtn) {
-      reportBtn.addEventListener(
-        "click",
-        function (e) {
-          e.stopPropagation();
-
-          showDiagnosticReport();
-        }
-      );
-    }
-
-    if (closeBtn) {
-      closeBtn.addEventListener(
-        "click",
-        function (e) {
-          e.stopPropagation();
-
-          state.panel.style.display =
-            "none";
-        }
-      );
-    }
-  }
-
-
-  function showDiagnosticReport() {
-    var r =
-      state.report || {};
-
-    var lines = [
-      "MANGO BOT v4.1 DIAGNOSTIC",
-      "----------------------------",
-      "SOURCE: " + state.source,
-      "SYMBOL: " + state.symbol,
-      "TIMEFRAME: " + state.timeframe,
-      "CANDLES: " + state.candles.length,
-      "VALIDATION: " + state.validation,
-      "SIGNAL: " + state.signal,
-      "BULL: " + state.bullScore,
-      "BEAR: " + state.bearScore,
-      "",
-      "DISCOVERY",
-      "INSPECTED: " +
-        (
-          discovery.inspected || 0
-        ),
-      "CANDIDATES: " +
-        (
-          discovery.candidates || 0
-        ),
-      "REJECTED: " +
-        (
-          discovery.rejected || 0
-        )
-    ];
-
-    if (
-      r.bestRejectedSource
-    ) {
-      lines.push(
-        "",
-        "BEST REJECTED SOURCE:",
-        r.bestRejectedSource,
-        "COUNT: " +
-          r.candleCount,
-        "VALIDATION: " +
-          r.validation,
-        "FRESHNESS: " +
-          r.freshness
-      );
-    }
-
-    if (
-      discovery.notes &&
-      discovery.notes.length
-    ) {
-      lines.push(
-        "",
-        "NOTES:"
-      );
-
-      for (
-        var i = 0;
-        i < discovery.notes.length;
-        i++
+  /* ============================================================
+     11. MAIN ASYNC SCAN
+     ============================================================ */
+
+  async function scanMarket() {
+    state.error = '';
+
+    /* First choice: local Bridge */
+    var bridge = await discoverBridge();
+
+    if (bridge) {
+      var symbol =
+        bridge.asset !== 'UNKNOWN'
+          ? bridge.asset
+          : pageSymbol();
+
+      var timeframe =
+        bridge.period > 0
+          ? periodToTimeframe(bridge.period)
+          : pageTimeframe();
+
+      /*
+       * If page has a clearly detected symbol and it conflicts
+       * with Bridge asset, do not analyze the wrong instrument.
+       */
+      var pageSym = pageSymbol();
+
+      if (
+        pageSym !== 'UNKNOWN' &&
+        symbol !== 'UNKNOWN'
       ) {
-        lines.push(
-          "- " +
-          discovery.notes[i]
-        );
-      }
-    }
-
-    if (state.error) {
-      lines.push(
-        "",
-        "ERROR:",
-        state.error
-      );
-    }
-
-    var text =
-      lines.join("\n");
-
-    /*
-     * Show report without requiring clipboard
-     * permissions.
-     */
-    var box =
-      document.createElement(
-        "textarea"
-      );
-
-    box.value = text;
-
-    box.style.position =
-      "fixed";
-
-    box.style.left =
-      "50%";
-
-    box.style.top =
-      "50%";
-
-    box.style.transform =
-      "translate(-50%,-50%)";
-
-    box.style.width =
-      "min(90vw,420px)";
-
-    box.style.height =
-      "320px";
-
-    box.style.zIndex =
-      "2147483647";
-
-    box.style.background =
-      "#111";
-
-    box.style.color =
-      "#fff";
-
-    box.style.border =
-      "2px solid #39ff88";
-
-    box.style.borderRadius =
-      "10px";
-
-    box.style.padding =
-      "12px";
-
-    box.style.fontSize =
-      "11px";
-
-    document.body.appendChild(
-      box
-    );
-
-    box.focus();
-    box.select();
-
-    setTimeout(
-      function () {
-        if (
-          box &&
-          box.parentNode
-        ) {
-          box.parentNode.removeChild(
-            box
-          );
-        }
-      },
-      15000
-    );
-  }
-
-
-  function createUI() {
-    /*
-     * Remove previous v4.1 UI only.
-     */
-    var old =
-      document.getElementById(
-        "khilji-mango-v41-root"
-      );
-
-    if (old) {
-      old.remove();
-    }
-
-    var root =
-      document.createElement(
-        "div"
-      );
-
-    root.id =
-      "khilji-mango-v41-root";
-
-    root.style.position =
-      "fixed";
-
-    root.style.left =
-      "14px";
-
-    root.style.bottom =
-      "14px";
-
-    root.style.zIndex =
-      "2147483646";
-
-    root.style.fontFamily =
-      "Arial,sans-serif";
-
-    /*
-     * Round MANGO BOT button.
-     */
-    var button =
-      document.createElement(
-        "button"
-      );
-
-    button.textContent =
-      "MANGO";
-
-    button.title =
-      "MANGO BOT";
-
-    button.style.width =
-      "68px";
-
-    button.style.height =
-      "68px";
-
-    button.style.borderRadius =
-      "50%";
-
-    button.style.border =
-      "2px solid #39ff88";
-
-    button.style.background =
-      "#07140c";
-
-    button.style.color =
-      "#39ff88";
-
-    button.style.fontWeight =
-      "900";
-
-    button.style.fontSize =
-      "12px";
-
-    button.style.cursor =
-      "pointer";
-
-    button.style.boxShadow =
-      "0 0 12px rgba(57,255,136,.35)";
-
-    /*
-     * Panel.
-     */
-    var panel =
-      document.createElement(
-        "div"
-      );
-
-    panel.style.position =
-      "absolute";
-
-    panel.style.left =
-      "0";
-
-    panel.style.bottom =
-      "78px";
-
-    panel.style.width =
-      "285px";
-
-    panel.style.maxHeight =
-      "75vh";
-
-    panel.style.overflow =
-      "auto";
-
-    panel.style.display =
-      "none";
-
-    panel.style.background =
-      "#101010";
-
-    panel.style.color =
-      "#eee";
-
-    panel.style.border =
-      "1px solid #39ff88";
-
-    panel.style.borderRadius =
-      "12px";
-
-    panel.style.padding =
-      "12px";
-
-    panel.style.boxSizing =
-      "border-box";
-
-    panel.style.boxShadow =
-      "0 8px 30px rgba(0,0,0,.5)";
-
-    /*
-     * Separate triangle/open handle.
-     */
-    var triangle =
-      document.createElement(
-        "button"
-      );
-
-    triangle.textContent =
-      "▲";
-
-    triangle.title =
-      "Open MANGO";
-
-    triangle.style.position =
-      "absolute";
-
-    triangle.style.right =
-      "-38px";
-
-    triangle.style.top =
-      "0";
-
-    triangle.style.width =
-      "32px";
-
-    triangle.style.height =
-      "32px";
-
-    triangle.style.border =
-      "1px solid #39ff88";
-
-    triangle.style.borderRadius =
-      "8px";
-
-    triangle.style.background =
-      "#07140c";
-
-    triangle.style.color =
-      "#39ff88";
-
-    triangle.style.cursor =
-      "pointer";
-
-    root.appendChild(
-      panel
-    );
-
-    root.appendChild(
-      button
-    );
-
-    root.appendChild(
-      triangle
-    );
-
-    document.body.appendChild(
-      root
-    );
-
-    state.panel =
-      panel;
-
-    state.button =
-      button;
-
-    state.triangle =
-      triangle;
-
-    function openPanel() {
-      panel.style.display =
-        "block";
-
-      scanMarket();
-
-      renderPanel();
-    }
-
-    button.addEventListener(
-      "click",
-      function (e) {
-        e.stopPropagation();
+        var a = symbol.replace('/', '');
+        var b = pageSym.replace('/', '');
 
         if (
-          panel.style.display ===
-          "block"
+          a !== b &&
+          a.indexOf(b) === -1 &&
+          b.indexOf(a) === -1
         ) {
-          panel.style.display =
-            "none";
-        } else {
-          openPanel();
+          return {
+            status: 'WAIT',
+            signal: 'NO DATA / WAIT',
+            reason:
+              'Bridge asset does not match the displayed page asset.',
+            source: 'MANGO Bridge',
+            symbol: symbol,
+            pageSymbol: pageSym,
+            timeframe: timeframe,
+            candleCount: bridge.candles.length,
+            latest:
+              bridge.candles[
+                bridge.candles.length - 1
+              ],
+            freshness: 'NOT ANALYZED'
+          };
         }
       }
-    );
 
-    triangle.addEventListener(
-      "click",
-      function (e) {
-        e.stopPropagation();
+      state.source = 'MANGO Bridge';
+      state.bridge = true;
+      state.symbol = symbol;
+      state.timeframe = timeframe;
+      state.candles = bridge.candles;
 
-        openPanel();
-      }
-    );
+      var bridgeResult = analyze(
+        bridge.candles,
+        symbol,
+        timeframe,
+        'MANGO Bridge'
+      );
 
-    panel.addEventListener(
-      "click",
-      function (e) {
-        e.stopPropagation();
-      }
-    );
+      state.result = bridgeResult;
 
-    window.__KHILJI_MANGO_V41__.open =
-      openPanel;
+      return bridgeResult;
+    }
+
+    /* Second choice: public webpage data */
+    var page = discoverPageCandles();
+
+    if (page) {
+      var pSymbol = pageSymbol();
+      var pTimeframe = pageTimeframe();
+
+      state.source = page.source;
+      state.bridge = false;
+      state.symbol = pSymbol;
+      state.timeframe = pTimeframe;
+      state.candles = page.candles;
+
+      var pageResult = analyze(
+        page.candles,
+        pSymbol,
+        pTimeframe,
+        page.source
+      );
+
+      state.result = pageResult;
+
+      return pageResult;
+    }
+
+    state.source = 'NONE DETECTED';
+    state.bridge = false;
+    state.symbol = pageSymbol();
+    state.timeframe = pageTimeframe();
+    state.candles = [];
+
+    var noData = {
+      status: 'WAIT',
+      signal: 'NO DATA / WAIT',
+      reason:
+        'No valid public page candles or local Bridge candles were found.',
+      source: 'NONE DETECTED',
+      symbol: state.symbol,
+      timeframe: state.timeframe,
+      candleCount: 0,
+      latest: null,
+      freshness: 'NO DATA'
+    };
+
+    state.result = noData;
+
+    return noData;
   }
 
+  /* ============================================================
+     12. UI
+     ============================================================ */
 
-  function initialize() {
+  var old =
+    document.getElementById(
+      'khilji-mango-root'
+    );
+
+  if (old) {
+    old.remove();
+  }
+
+  var root =
+    document.createElement('div');
+
+  root.id = 'khilji-mango-root';
+
+  root.style.cssText =
+    'position:fixed;' +
+    'z-index:2147483647;' +
+    'font-family:Arial,sans-serif;';
+
+  var button =
+    document.createElement('button');
+
+  button.innerHTML = '🥭<br><b>MANGO</b>';
+
+  button.style.cssText =
+    'position:fixed;' +
+    'left:20px;' +
+    'top:220px;' +
+    'width:70px;' +
+    'height:70px;' +
+    'border-radius:50%;' +
+    'border:2px solid #22c55e;' +
+    'background:#0f172a;' +
+    'color:white;' +
+    'font-size:15px;' +
+    'font-weight:bold;' +
+    'cursor:pointer;';
+
+  var panel =
+    document.createElement('div');
+
+  panel.style.cssText =
+    'display:none;' +
+    'position:fixed;' +
+    'left:105px;' +
+    'top:100px;' +
+    'width:350px;' +
+    'max-height:85vh;' +
+    'overflow:auto;' +
+    'padding:15px;' +
+    'box-sizing:border-box;' +
+    'background:#07111f;' +
+    'color:#e5e7eb;' +
+    'border:1px solid #334155;' +
+    'border-radius:12px;' +
+    'box-shadow:0 15px 40px rgba(0,0,0,.7);';
+
+  panel.innerHTML =
+    '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">' +
+      '<b style="color:#22c55e;">🥭 MANGO BOT v4.2</b>' +
+      '<button id="mango-close" style="background:none;border:0;color:#fff;font-size:18px;cursor:pointer;">✕</button>' +
+    '</div>' +
+
+    '<div id="mango-signal" style="text-align:center;font-size:22px;font-weight:900;padding:12px;margin-bottom:10px;border:1px solid #334155;border-radius:8px;">NO DATA / WAIT</div>' +
+
+    '<button id="mango-scan" style="width:100%;padding:11px;border:0;border-radius:8px;background:#22c55e;color:#06100a;font-weight:900;cursor:pointer;margin-bottom:10px;">SCAN MARKET</button>' +
+
+    '<div id="mango-info" style="font-family:monospace;font-size:11px;line-height:1.7;">' +
+      'DATA SOURCE: --<br>' +
+      'SYMBOL: --<br>' +
+      'TIMEFRAME: --<br>' +
+      'CANDLE COUNT: 0<br>' +
+      'LATEST CANDLE: --<br>' +
+      'LATEST PRICE: --<br>' +
+      'FRESHNESS: --<br>' +
+      'VALIDATION: --<br>' +
+      'EMA 9: --<br>' +
+      'EMA 21: --<br>' +
+      'EMA 50: --<br>' +
+      'RSI 14: --<br>' +
+      'MACD: --<br>' +
+      'MACD SIGNAL: --<br>' +
+      'MACD HIST: --<br>' +
+      'MOMENTUM: --<br>' +
+      'SUPPORT: --<br>' +
+      'RESISTANCE: --<br>' +
+      'BULL SCORE: 0<br>' +
+      'BEAR SCORE: 0' +
+    '</div>' +
+
+    '<div id="mango-reason" style="margin-top:10px;color:#94a3b8;font-size:11px;">Ready.</div>';
+
+  root.appendChild(button);
+  root.appendChild(panel);
+  document.body.appendChild(root);
+
+  var signalEl =
+    document.getElementById(
+      'mango-signal'
+    );
+
+  var infoEl =
+    document.getElementById(
+      'mango-info'
+    );
+
+  var reasonEl =
+    document.getElementById(
+      'mango-reason'
+    );
+
+  var scanBtn =
+    document.getElementById(
+      'mango-scan'
+    );
+
+  var closeBtn =
+    document.getElementById(
+      'mango-close'
+    );
+
+  function fmt(v, d) {
+    return v === null ||
+      v === undefined ||
+      !isFinite(Number(v))
+      ? '--'
+      : Number(v).toFixed(d || 2);
+  }
+
+  function display(result) {
+    var color = '#f59e0b';
+
+    if (result.signal === 'UP') {
+      color = '#22c55e';
+    } else if (result.signal === 'DOWN') {
+      color = '#ef4444';
+    }
+
+    signalEl.textContent =
+      result.signal || 'NO DATA / WAIT';
+
+    signalEl.style.color = color;
+    signalEl.style.borderColor = color;
+
+    var latest =
+      result.latest;
+
+    var latestTime =
+      latest
+        ? new Date(
+            latest.timestamp
+          ).toLocaleTimeString()
+        : '--';
+
+    var latestPrice =
+      latest
+        ? fmt(latest.close, 5)
+        : '--';
+
+    infoEl.innerHTML =
+      'DATA SOURCE: ' +
+      (result.source || '--') + '<br>' +
+
+      'SYMBOL: ' +
+      (result.symbol || '--') + '<br>' +
+
+      'TIMEFRAME: ' +
+      (result.timeframe || '--') + '<br>' +
+
+      'CANDLE COUNT: ' +
+      (result.candleCount || 0) + '<br>' +
+
+      'LATEST CANDLE: ' +
+      latestTime + '<br>' +
+
+      'LATEST PRICE: ' +
+      latestPrice + '<br>' +
+
+      'FRESHNESS: ' +
+      (result.freshness || '--') + '<br>' +
+
+      'VALIDATION: ' +
+      (
+        result.status === 'OK'
+          ? 'PASSED'
+          : 'FAILED / WAIT'
+      ) + '<br>' +
+
+      'EMA 9: ' +
+      fmt(result.ema9, 5) + '<br>' +
+
+      'EMA 21: ' +
+      fmt(result.ema21, 5) + '<br>' +
+
+      'EMA 50: ' +
+      fmt(result.ema50, 5) + '<br>' +
+
+      'RSI 14: ' +
+      fmt(result.rsi, 1) + '<br>' +
+
+      'MACD: ' +
+      fmt(result.macd, 5) + '<br>' +
+
+      'MACD SIGNAL: ' +
+      fmt(result.macdSignal, 5) + '<br>' +
+
+      'MACD HIST: ' +
+      fmt(result.macdHistogram, 5) + '<br>' +
+
+      'MOMENTUM: ' +
+      fmt(result.momentum, 2) + '%<br>' +
+
+      'SUPPORT: ' +
+      fmt(result.support, 5) + '<br>' +
+
+      'RESISTANCE: ' +
+      fmt(result.resistance, 5) + '<br>' +
+
+      'BULL SCORE: ' +
+      (result.bullScore || 0) + '<br>' +
+
+      'BEAR SCORE: ' +
+      (result.bearScore || 0);
+
+    reasonEl.textContent =
+      result.reason ||
+      (
+        result.reasons &&
+        result.reasons.length
+          ? result.reasons.join(' • ')
+          : 'No additional reason.'
+      );
+  }
+
+  async function executeScan() {
+    scanBtn.disabled = true;
+    scanBtn.textContent =
+      'READING REAL DATA...';
+
+    signalEl.textContent =
+      'WAIT...';
+
     try {
-      createUI();
+      var result =
+        await scanMarket();
+
+      display(result);
     } catch (e) {
-      state.error =
-        e && e.message
-          ? e.message
-          : String(e);
+      console.error(
+        '[MANGO BOT]',
+        e
+      );
+
+      display({
+        status: 'WAIT',
+        signal: 'NO DATA / WAIT',
+        reason:
+          'Bridge/page data could not be read.',
+        source: 'ERROR',
+        symbol: 'UNKNOWN',
+        timeframe: 'UNKNOWN',
+        candleCount: 0,
+        freshness: 'NO DATA'
+      });
+    } finally {
+      scanBtn.disabled = false;
+      scanBtn.textContent =
+        'SCAN MARKET';
     }
   }
 
+  button.addEventListener(
+    'click',
+    function () {
+      panel.style.display =
+        panel.style.display === 'none'
+          ? 'block'
+          : 'none';
+    }
+  );
 
-  /*
-   * Bookmarklet can execute either before or
-   * after DOMContentLoaded.
-   */
-  if (
-    document.readyState ===
-    "loading"
-  ) {
-    document.addEventListener(
-      "DOMContentLoaded",
-      initialize,
-      {
-        once: true
-      }
-    );
-  } else {
-    initialize();
-  }
+  closeBtn.addEventListener(
+    'click',
+    function () {
+      panel.style.display =
+        'none';
+    }
+  );
+
+  scanBtn.addEventListener(
+    'click',
+    executeScan
+  );
+
+  window.__MANGO_BOT_INSTANCE__ = {
+    show: function () {
+      panel.style.display =
+        'block';
+      executeScan();
+    },
+
+    hide: function () {
+      panel.style.display =
+        'none';
+    },
+
+    scan: executeScan,
+
+    version: '4.2.0'
+  };
+
+  console.log(
+    '[MANGO BOT] v4.2.0 loaded. Bridge + public candle discovery enabled.'
+  );
 
 })();
