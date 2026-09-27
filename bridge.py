@@ -144,7 +144,17 @@ async def main():
 
     await load_history(client)
 
-    app = web.Application()
+    
+
+@web.middleware
+async def cors_middleware(request, handler):
+    response = await handler(request)
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    return response
+
+app.middlewares.append(cors_middleware)
 
     app.router.add_get("/", root)
     app.router.add_get("/status", status)
