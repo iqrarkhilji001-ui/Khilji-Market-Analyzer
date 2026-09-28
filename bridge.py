@@ -54,7 +54,7 @@ def add_candles(data):
 
 
 async def load_history(client):
-    logging.info("Loading historical candles...")
+    logging.info("Loading historical candles for %s (period=%ss)...", ASSET, PERIOD)
 
     data = await client.get_historical_candles(
         asset=ASSET,
@@ -70,7 +70,7 @@ async def load_history(client):
 
 
 async def realtime_loop(client):
-    logging.info("Starting realtime candle stream...")
+    logging.info("Starting realtime candle stream for %s...", ASSET)
 
     await client.start_candles_stream(ASSET, PERIOD)
 
@@ -111,7 +111,6 @@ async def candles_api(request):
         candles.values(),
         key=lambda x: x["time"]
     )
-
     return web.json_response(data[-500:])
 
 
@@ -120,6 +119,19 @@ async def health(request):
         "ok": True,
         "candle_count": len(candles)
     })
+
+
+@web.middleware
+async def cors_middleware(request, handler):
+    if request.method == "OPTIONS":
+        response = web.Response()
+    else:
+        response = await handler(request)
+
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    return response
 
 
 async def main():
@@ -136,25 +148,14 @@ async def main():
     ok, reason = await client.connect()
 
     if not ok:
-        raise RuntimeError(
-            f"Quotex connection failed: {reason}"
-        )
+        raise RuntimeError(f"Quotex connection failed: {reason}")
 
     logging.info("Quotex connected.")
 
     await load_history(client)
 
-    
-
-@web.middleware
-async def cors_middleware(request, handler):
-    response = await handler(request)
-    response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
-    response.headers["Access-Control-Allow-Headers"] = "*"
-    return response
-
-app.middlewares.append(cors_middleware)
+    # ---- HTTP server setup ----
+    app = web.Application(middlewares=[cors_middleware])
 
     app.router.add_get("/", root)
     app.router.add_get("/status", status)
@@ -167,11 +168,8 @@ app.middlewares.append(cors_middleware)
     site = web.TCPSite(runner, HOST, PORT)
     await site.start()
 
-    logging.info(
-        "MANGO Bridge running at http://%s:%s",
-        HOST,
-        PORT
-    )
+    logging.info("MANGO Bridge running at http://%s:%s", HOST, PORT)
+    logging.info("Serving asset=%s  period=%ss  candles=%s", ASSET, PERIOD, len(candles))
 
     try:
         await realtime_loop(client)
