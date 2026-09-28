@@ -1,26 +1,24 @@
 /**
- * KHILJI MARKET ANALYZER - MANGO BOT v4.2.0
- * Production JavaScript Engine
+ * KHILJI MARKET ANALYZER - MANGO BOT v4.3.0
+ * DIAGNOSTIC DATA DISCOVERY BUILD
  *
- * REAL MARKET DATA ONLY
- * Bridge + Public Page Data
- * NO FAKE / RANDOM / SIMULATED CANDLES
+ * REAL DATA ONLY
+ * NO FAKE CANDLES
+ * NO RANDOM DATA
  * NO TRADE EXECUTION
- * UP / DOWN / WAIT ONLY
+ * NO WEBSOCKET INTERCEPTION
+ * NO AUTH / SESSION BYPASS
  */
 
 (function () {
-  'use strict';
+  "use strict";
 
-  /* ============================================================
-     1. DUPLICATE GUARD
-     ============================================================ */
-
+  /* =========================
+     DUPLICATE GUARD
+  ========================= */
   if (window.__MANGO_BOT_LOADED__) {
-    if (
-      window.__MANGO_BOT_INSTANCE__ &&
-      typeof window.__MANGO_BOT_INSTANCE__.show === 'function'
-    ) {
+    if (window.__MANGO_BOT_INSTANCE__ &&
+        window.__MANGO_BOT_INSTANCE__.show) {
       window.__MANGO_BOT_INSTANCE__.show();
     }
     return;
@@ -28,1429 +26,839 @@
 
   window.__MANGO_BOT_LOADED__ = true;
 
-  /* ============================================================
-     2. CONFIG
-     ============================================================ */
-
-  var config = {
-    bridgeBase: 'http://127.0.0.1:8765',
-    emaShort: 9,
-    emaMedium: 21,
-    emaLong: 50,
-    rsiPeriod: 14,
-    rsiOverbought: 70,
-    rsiOversold: 30,
-    macdFast: 12,
-    macdSlow: 26,
-    macdSignal: 9,
-    momentumPeriod: 10,
-    srLookback: 20,
-    minScore: 70,
-    minCandles: 50
+  /* =========================
+     CONFIG
+  ========================= */
+  var CFG = {
+    bridge: "http://127.0.0.1:8765",
+    minCandles: 50,
+    scanLimit: 500
   };
-
-  /* ============================================================
-     3. STATE
-     ============================================================ */
 
   var state = {
-    source: 'NONE DETECTED',
-    symbol: 'UNKNOWN',
-    timeframe: 'UNKNOWN',
+    source: "NONE DETECTED",
     candles: [],
-    bridge: false,
-    error: '',
-    result: null
+    symbol: "UNKNOWN",
+    timeframe: "UNKNOWN",
+    latest: null,
+    hint: "NO DATA"
   };
 
-  /* ============================================================
-     4. HELPERS
-     ============================================================ */
-
-  function finiteNumber(v) {
+  /* =========================
+     HELPERS
+  ========================= */
+  function num(v) {
     var n = Number(v);
-    return isFinite(n) ? n : null;
+    return Number.isFinite(n) ? n : null;
   }
 
-  function cleanSymbol(v) {
-    if (!v) return 'UNKNOWN';
+  function timeValue(v) {
+    var n = num(v);
+    if (n === null) return null;
 
-    return String(v)
-      .trim()
-      .toUpperCase()
-      .replace(/_/g, '/');
+    if (n < 10000000000) n *= 1000;
+
+    return n;
   }
 
-  function periodToTimeframe(seconds) {
-    var n = Number(seconds);
+  function candle(o) {
+    if (!o) return null;
 
-    if (!isFinite(n) || n <= 0) {
-      return 'UNKNOWN';
-    }
+    var t = timeValue(
+      o.time !== undefined ? o.time :
+      o.timestamp !== undefined ? o.timestamp :
+      o.ts !== undefined ? o.ts :
+      o.from !== undefined ? o.from :
+      o.t
+    );
 
-    if (n < 60) return n + 's';
-    if (n % 3600 === 0) return (n / 3600) + 'h';
-    if (n % 60 === 0) return (n / 60) + 'm';
+    var op = num(
+      o.open !== undefined ? o.open :
+      o.o
+    );
 
-    return n + 's';
-  }
+    var hi = num(
+      o.high !== undefined ? o.high :
+      o.h
+    );
 
-  function normalizeCandle(c) {
-    if (!c || typeof c !== 'object') {
-      return null;
-    }
+    var lo = num(
+      o.low !== undefined ? o.low :
+      o.l
+    );
 
-    var t =
-      c.timestamp !== undefined ? c.timestamp :
-      c.time !== undefined ? c.time :
-      c.t !== undefined ? c.t :
-      c.from !== undefined ? c.from :
-      null;
+    var cl = num(
+      o.close !== undefined ? o.close :
+      o.c
+    );
 
-    var o =
-      c.open !== undefined ? c.open :
-      c.o !== undefined ? c.o :
-      null;
+    if ([t, op, hi, lo, cl].some(function (x) {
+      return x === null;
+    })) return null;
 
-    var h =
-      c.high !== undefined ? c.high :
-      c.h !== undefined ? c.h :
-      null;
+    if (t > Date.now() + 60000) return null;
 
-    var l =
-      c.low !== undefined ? c.low :
-      c.l !== undefined ? c.l :
-      null;
-
-    var cl =
-      c.close !== undefined ? c.close :
-      c.c !== undefined ? c.c :
-      null;
-
-    t = finiteNumber(t);
-    o = finiteNumber(o);
-    h = finiteNumber(h);
-    l = finiteNumber(l);
-    cl = finiteNumber(cl);
-
-    if (
-      t === null ||
-      o === null ||
-      h === null ||
-      l === null ||
-      cl === null
-    ) {
-      return null;
-    }
-
-    if (t < 100000000000) {
-      t = t * 1000;
-    }
-
-    if (
-      o <= 0 ||
-      h <= 0 ||
-      l <= 0 ||
-      cl <= 0
-    ) {
-      return null;
-    }
-
-    if (
-      l > o ||
-      l > cl ||
-      h < o ||
-      h < cl ||
-      h < l
-    ) {
-      return null;
-    }
-
-    if (t > Date.now() + 60000) {
+    if (lo > op || lo > cl || hi < op || hi < cl) {
       return null;
     }
 
     return {
-      timestamp: t,
-      open: o,
-      high: h,
-      low: l,
+      time: Math.floor(t),
+      open: op,
+      high: hi,
+      low: lo,
       close: cl
     };
   }
 
-  function normalizeArray(arr) {
-    if (!Array.isArray(arr)) {
-      return [];
-    }
+  function arrayCandle(x) {
+    if (!Array.isArray(x) || x.length < 5) return null;
 
-    var map = {};
+    return candle({
+      time: x[0],
+      open: x[1],
+      high: x[2],
+      low: x[3],
+      close: x[4]
+    });
+  }
+
+  function normalize(arr) {
+    if (!Array.isArray(arr)) return [];
+
     var out = [];
 
     for (var i = 0; i < arr.length; i++) {
-      var c = normalizeCandle(arr[i]);
+      var c = Array.isArray(arr[i])
+        ? arrayCandle(arr[i])
+        : candle(arr[i]);
 
-      if (!c) continue;
-
-      if (!map[c.timestamp]) {
-        map[c.timestamp] = true;
-        out.push(c);
-      }
+      if (c) out.push(c);
     }
 
-    out.sort(function (a, b) {
-      return a.timestamp - b.timestamp;
+    var seen = {};
+    out = out.filter(function (c) {
+      if (seen[c.time]) return false;
+      seen[c.time] = true;
+      return true;
     });
 
-    return out;
+    out.sort(function (a, b) {
+      return a.time - b.time;
+    });
+
+    return out.slice(-CFG.scanLimit);
   }
 
-  /* ============================================================
-     5. PAGE SYMBOL / TIMEFRAME
-     ============================================================ */
+  function merge(a, b) {
+    return normalize((a || []).concat(b || []));
+  }
 
-  function pageSymbol() {
+  function fmtTime(t) {
+    if (!t) return "N/A";
+
     try {
-      if (
-        window.tvWidget &&
-        typeof window.tvWidget.activeChart === 'function'
-      ) {
-        var chart = window.tvWidget.activeChart();
-
-        if (chart && typeof chart.symbol === 'function') {
-          var s = chart.symbol();
-
-          if (s) {
-            return cleanSymbol(s);
-          }
-        }
-      }
-    } catch (e) {}
-
-    var selectors = [
-      '.current-symbol',
-      '.asset-name',
-      '.active-asset',
-      '.pairs-item.active',
-      '[data-qa="current-asset"]',
-      '[data-testid="ticker-name"]',
-      '.symbol-name'
-    ];
-
-    for (var i = 0; i < selectors.length; i++) {
-      try {
-        var el = document.querySelector(selectors[i]);
-
-        if (el && el.textContent) {
-          var txt = el.textContent.trim();
-
-          var match = txt.match(
-            /[A-Z]{3}[\/_][A-Z]{3}|[A-Z]{6}|[A-Z]{3,6}_OTC/i
-          );
-
-          if (match) {
-            return cleanSymbol(match[0]);
-          }
-        }
-      } catch (e2) {}
+      return new Date(t).toLocaleString();
+    } catch (e) {
+      return "N/A";
     }
-
-    try {
-      var q = new URLSearchParams(window.location.search);
-
-      var urlSymbol =
-        q.get('symbol') ||
-        q.get('pair') ||
-        q.get('asset');
-
-      if (urlSymbol) {
-        return cleanSymbol(urlSymbol);
-      }
-    } catch (e3) {}
-
-    return 'UNKNOWN';
   }
 
-  function pageTimeframe() {
+  /* =========================
+     BRIDGE
+  ========================= */
+  async function bridgeStatus() {
     try {
-      if (
-        window.tvWidget &&
-        typeof window.tvWidget.activeChart === 'function'
-      ) {
-        var chart = window.tvWidget.activeChart();
+      var r = await fetch(CFG.bridge + "/status", {
+        method: "GET",
+        cache: "no-store"
+      });
 
-        if (chart && typeof chart.resolution === 'function') {
-          var r = chart.resolution();
+      if (!r.ok) return null;
 
-          if (r) {
-            return String(r);
-          }
-        }
-      }
-    } catch (e) {}
-
-    var selectors = [
-      '.timeframe-select .active',
-      '.time-frame-button.active',
-      '[data-timeframe].active',
-      '.timeframe-item.active',
-      '[data-period].active'
-    ];
-
-    for (var i = 0; i < selectors.length; i++) {
-      try {
-        var el = document.querySelector(selectors[i]);
-
-        if (el && el.textContent) {
-          var txt = el.textContent.trim();
-
-          if (/^\d+[smhdM]?$/i.test(txt)) {
-            return txt;
-          }
-        }
-      } catch (e2) {}
-    }
-
-    return 'UNKNOWN';
-  }
-
-  /* ============================================================
-     6. BRIDGE DATA
-     ============================================================ */
-
-  async function fetchBridgeStatus() {
-    try {
-      var response = await fetch(
-        config.bridgeBase + '/status?t=' + Date.now(),
-        {
-          method: 'GET',
-          cache: 'no-store'
-        }
-      );
-
-      if (!response.ok) {
-        return null;
-      }
-
-      var data = await response.json();
-
-      if (!data || data.ok !== true) {
-        return null;
-      }
-
-      return data;
+      return await r.json();
     } catch (e) {
       return null;
     }
   }
 
-  async function fetchBridgeCandles() {
+  async function bridgeCandles() {
     try {
-      var response = await fetch(
-        config.bridgeBase + '/candles?t=' + Date.now(),
-        {
-          method: 'GET',
-          cache: 'no-store'
-        }
+      var r = await fetch(CFG.bridge + "/candles", {
+        method: "GET",
+        cache: "no-store"
+      });
+
+      if (!r.ok) return [];
+
+      var j = await r.json();
+
+      return normalize(
+        Array.isArray(j) ? j :
+        Array.isArray(j.candles) ? j.candles :
+        []
       );
-
-      if (!response.ok) {
-        return null;
-      }
-
-      var data = await response.json();
-
-      if (!Array.isArray(data)) {
-        return null;
-      }
-
-      var candles = normalizeArray(data);
-
-      if (candles.length < config.minCandles) {
-        return null;
-      }
-
-      return candles;
     } catch (e) {
-      return null;
+      return [];
     }
   }
 
-  async function discoverBridge() {
-    var status = await fetchBridgeStatus();
-
-    if (!status) {
-      return null;
-    }
-
-    var candles = await fetchBridgeCandles();
-
-    if (!candles) {
-      return null;
-    }
-
-    return {
-      candles: candles,
-      asset: cleanSymbol(status.asset),
-      period: Number(status.period) || 0
+  /* =========================
+     TRADINGVIEW DISCOVERY
+  ========================= */
+  function tradingViewScan() {
+    var result = {
+      candles: [],
+      symbol: "UNKNOWN",
+      timeframe: "UNKNOWN",
+      keys: []
     };
-  }
-
-  /* ============================================================
-     7. PUBLIC PAGE DATA FALLBACK
-     ============================================================ */
-
-  function discoverPageCandles() {
-    var raw = null;
-    var source = 'NONE DETECTED';
 
     try {
-      if (
-        window.tvWidget &&
-        typeof window.tvWidget.activeChart === 'function'
-      ) {
-        var chart = window.tvWidget.activeChart();
+      var tv = window.tvWidget;
 
-        if (
-          chart &&
-          Array.isArray(chart.data) &&
-          chart.data.length >= config.minCandles
-        ) {
-          raw = chart.data;
-          source = 'TradingView Chart Widget';
+      if (!tv) return result;
+
+      result.keys = Object.keys(tv).slice(0, 30);
+
+      var chart = null;
+
+      try {
+        chart = tv.activeChart();
+      } catch (e) {}
+
+      if (!chart) return result;
+
+      try {
+        if (typeof chart.symbol === "function") {
+          result.symbol = chart.symbol() || "UNKNOWN";
+        }
+      } catch (e) {}
+
+      try {
+        if (typeof chart.resolution === "function") {
+          result.timeframe = chart.resolution() || "UNKNOWN";
+        }
+      } catch (e) {}
+
+      /* Public chart API probes */
+      var candidates = [];
+
+      try {
+        if (typeof chart.data === "function") {
+          candidates.push(chart.data());
+        } else if (Array.isArray(chart.data)) {
+          candidates.push(chart.data);
+        }
+      } catch (e) {}
+
+      try {
+        if (typeof chart.getData === "function") {
+          candidates.push(chart.getData());
+        }
+      } catch (e) {}
+
+      for (var i = 0; i < candidates.length; i++) {
+        var n = normalize(candidates[i]);
+
+        if (n.length > result.candles.length) {
+          result.candles = n;
         }
       }
     } catch (e) {}
-
-    if (!raw) {
-      try {
-        if (
-          window.Highcharts &&
-          Array.isArray(window.Highcharts.charts)
-        ) {
-          for (
-            var i = 0;
-            i < window.Highcharts.charts.length;
-            i++
-          ) {
-            var hc = window.Highcharts.charts[i];
-
-            if (!hc || !Array.isArray(hc.series)) {
-              continue;
-            }
-
-            for (
-              var j = 0;
-              j < hc.series.length;
-              j++
-            ) {
-              var data = hc.series[j].data;
-
-              if (
-                Array.isArray(data) &&
-                data.length >= config.minCandles
-              ) {
-                raw = data.map(function (p) {
-                  return {
-                    time: p.x !== undefined ? p.x : p.time,
-                    open: p.open,
-                    high: p.high,
-                    low: p.low,
-                    close: p.close
-                  };
-                });
-
-                source = 'Highcharts OHLC';
-                break;
-              }
-            }
-
-            if (raw) break;
-          }
-        }
-      } catch (e2) {}
-    }
-
-    if (!raw) {
-      var names = [
-        'candles',
-        'quotes',
-        'chartData',
-        'historyCandles',
-        'activeCandles',
-        '_candles',
-        'rawCandles',
-        'bars',
-        'ohlcData',
-        'chartQuotes'
-      ];
-
-      for (var n = 0; n < names.length; n++) {
-        try {
-          var key = names[n];
-
-          if (
-            Array.isArray(window[key]) &&
-            window[key].length >= config.minCandles
-          ) {
-            raw = window[key];
-            source = 'Window Array: ' + key;
-            break;
-          }
-        } catch (e3) {}
-      }
-    }
-
-    if (!raw) {
-      return null;
-    }
-
-    var candles = normalizeArray(raw);
-
-    if (candles.length < config.minCandles) {
-      return null;
-    }
-
-    return {
-      candles: candles,
-      source: source
-    };
-  }
-
-  /* ============================================================
-     8. FRESHNESS
-     ============================================================ */
-
-  function freshness(timestamp, timeframe) {
-    if (!timestamp) {
-      return {
-        live: false,
-        label: 'NO DATA'
-      };
-    }
-
-    var diff = Math.max(
-      0,
-      Math.round((Date.now() - timestamp) / 1000)
-    );
-
-    var max = 180;
-
-    if (
-      timeframe === '5s' ||
-      timeframe === '10s' ||
-      timeframe === '15s'
-    ) {
-      max = 45;
-    } else if (timeframe === '30s') {
-      max = 90;
-    } else if (timeframe === '5m') {
-      max = 600;
-    } else if (timeframe === '15m') {
-      max = 1800;
-    }
-
-    return {
-      live: diff <= max,
-      label:
-        diff <= max
-          ? 'LIVE (' + diff + 's ago)'
-          : 'STALE (' + diff + 's ago)'
-    };
-  }
-
-  /* ============================================================
-     9. INDICATORS
-     ============================================================ */
-
-  function ema(values, period) {
-    if (!values || values.length < period) {
-      return null;
-    }
-
-    var sum = 0;
-
-    for (var i = 0; i < period; i++) {
-      sum += values[i];
-    }
-
-    var result = sum / period;
-    var k = 2 / (period + 1);
-
-    for (var j = period; j < values.length; j++) {
-      result =
-        values[j] * k +
-        result * (1 - k);
-    }
 
     return result;
   }
 
-  function rsi(values, period) {
-    if (!values || values.length <= period) {
-      return null;
-    }
+  /* =========================
+     HIGHCHARTS DISCOVERY
+  ========================= */
+  function highchartsScan() {
+    var result = [];
 
-    var gain = 0;
-    var loss = 0;
+    try {
+      var charts = window.Highcharts &&
+                   Array.isArray(window.Highcharts.charts)
+        ? window.Highcharts.charts
+        : [];
 
-    for (var i = 1; i <= period; i++) {
-      var d = values[i] - values[i - 1];
+      charts.forEach(function (ch) {
+        if (!ch || !ch.series) return;
 
-      if (d > 0) {
-        gain += d;
-      } else {
-        loss += Math.abs(d);
-      }
-    }
+        ch.series.forEach(function (s) {
+          if (!s || !Array.isArray(s.points)) return;
 
-    var avgGain = gain / period;
-    var avgLoss = loss / period;
+          var arr = [];
 
-    for (var j = period + 1; j < values.length; j++) {
-      var change = values[j] - values[j - 1];
+          s.points.forEach(function (p) {
+            if (!p) return;
 
-      var g = change > 0 ? change : 0;
-      var l = change < 0 ? Math.abs(change) : 0;
+            if (
+              p.open !== undefined &&
+              p.high !== undefined &&
+              p.low !== undefined &&
+              p.close !== undefined
+            ) {
+              arr.push({
+                time: p.x,
+                open: p.open,
+                high: p.high,
+                low: p.low,
+                close: p.close
+              });
+            }
+          });
 
-      avgGain =
-        ((avgGain * (period - 1)) + g) /
-        period;
+          result = merge(result, arr);
+        });
+      });
+    } catch (e) {}
 
-      avgLoss =
-        ((avgLoss * (period - 1)) + l) /
-        period;
-    }
-
-    if (avgLoss === 0) {
-      return 100;
-    }
-
-    var rs = avgGain / avgLoss;
-
-    return 100 - (100 / (1 + rs));
+    return result;
   }
 
-  function macd(values) {
-    if (
-      !values ||
-      values.length <
-        config.macdSlow + config.macdSignal
-    ) {
-      return null;
+  /* =========================
+     WINDOW ARRAY DISCOVERY
+  ========================= */
+  function windowArrayScan() {
+    var names = [
+      "candles",
+      "quotes",
+      "chartData",
+      "historyCandles",
+      "activeCandles",
+      "currentQuotes",
+      "_candles",
+      "rawCandles",
+      "bars",
+      "ohlcData",
+      "chartQuotes",
+      "priceData",
+      "history",
+      "marketData",
+      "klineData",
+      "ohlcv"
+    ];
+
+    var best = [];
+    var found = [];
+
+    names.forEach(function (name) {
+      try {
+        var v = window[name];
+
+        if (Array.isArray(v)) {
+          var n = normalize(v);
+
+          if (n.length) {
+            found.push(name + ":" + n.length);
+
+            if (n.length > best.length) {
+              best = n;
+            }
+          }
+        }
+      } catch (e) {}
+    });
+
+    return {
+      candles: best,
+      found: found
+    };
+  }
+
+  /* =========================
+     DOM OHLC DISCOVERY
+  ========================= */
+  function domScan() {
+    var selectors = [
+      "[data-open][data-high][data-low][data-close]",
+      "[data-open][data-close]",
+      "[data-o][data-h][data-l][data-c]",
+      "[data-time][data-open][data-high][data-low][data-close]"
+    ];
+
+    var out = [];
+
+    selectors.forEach(function (sel) {
+      try {
+        document.querySelectorAll(sel).forEach(function (el) {
+          var c = candle({
+            time:
+              el.getAttribute("data-time") ||
+              el.getAttribute("data-timestamp") ||
+              Date.now(),
+
+            open:
+              el.getAttribute("data-open") ||
+              el.getAttribute("data-o"),
+
+            high:
+              el.getAttribute("data-high") ||
+              el.getAttribute("data-h"),
+
+            low:
+              el.getAttribute("data-low") ||
+              el.getAttribute("data-l"),
+
+            close:
+              el.getAttribute("data-close") ||
+              el.getAttribute("data-c")
+          });
+
+          if (c) out.push(c);
+        });
+      } catch (e) {}
+    });
+
+    return normalize(out);
+  }
+
+  /* =========================
+     PERFORMANCE RESOURCE HINTS
+     ========================= */
+  function resourceScan() {
+    var hits = [];
+
+    try {
+      var entries = performance.getEntriesByType("resource") || [];
+
+      entries.forEach(function (e) {
+        var u = String(e.name || "");
+
+        if (
+          /candle|candles|chart|quote|quotes|ohlc|ohlcv|kline|market|price|history|stream|socket/i.test(u)
+        ) {
+          hits.push(u);
+        }
+      });
+    } catch (e) {}
+
+    return hits.slice(-30);
+  }
+
+  /* =========================
+     PUBLIC GLOBAL HINTS
+  ========================= */
+  function globalScan() {
+    var hits = [];
+
+    try {
+      Object.keys(window).forEach(function (k) {
+        if (
+          /candle|chart|quote|ohlc|kline|market|price|history|bars/i.test(k)
+        ) {
+          hits.push(k);
+        }
+      });
+    } catch (e) {}
+
+    return hits.slice(0, 80);
+  }
+
+  /* =========================
+     SYMBOL
+  ========================= */
+  function detectSymbol(tvSymbol) {
+    if (tvSymbol && tvSymbol !== "UNKNOWN") {
+      return tvSymbol;
     }
 
-    var fast = [];
-    var slow = [];
+    var selectors = [
+      ".current-symbol",
+      ".asset-select",
+      ".header__asset-name",
+      ".pairs-item.active",
+      ".asset-name",
+      ".active-asset",
+      ".btn-symbol",
+      ".open-chart-asset-name",
+      "[data-qa='current-asset']",
+      "[data-testid='ticker-name']",
+      ".symbol-name"
+    ];
 
-    var kFast =
-      2 / (config.macdFast + 1);
+    for (var i = 0; i < selectors.length; i++) {
+      try {
+        var el = document.querySelector(selectors[i]);
 
-    var kSlow =
-      2 / (config.macdSlow + 1);
+        if (el) {
+          var t = (el.textContent || "").trim();
 
-    var fastEma = values[0];
-    var slowEma = values[0];
+          if (t && t.length < 80) {
+            return t;
+          }
+        }
+      } catch (e) {}
+    }
 
-    for (var i = 1; i < values.length; i++) {
-      fastEma =
-        values[i] * kFast +
-        fastEma * (1 - kFast);
+    try {
+      var p = new URLSearchParams(location.search);
 
-      slowEma =
-        values[i] * kSlow +
-        slowEma * (1 - kSlow);
+      return (
+        p.get("symbol") ||
+        p.get("pair") ||
+        p.get("asset") ||
+        "UNKNOWN"
+      );
+    } catch (e) {
+      return "UNKNOWN";
+    }
+  }
 
-      if (i >= config.macdSlow - 1) {
-        fast.push(fastEma);
-        slow.push(slowEma);
+  /* =========================
+     TIMEFRAME
+  ========================= */
+  function detectTimeframe(tvTimeframe, candles) {
+    if (tvTimeframe && tvTimeframe !== "UNKNOWN") {
+      return String(tvTimeframe);
+    }
+
+    var selectors = [
+      ".timeframe.active",
+      ".time-frame.active",
+      "[data-timeframe].active",
+      "[data-interval].active",
+      "[data-resolution].active"
+    ];
+
+    for (var i = 0; i < selectors.length; i++) {
+      try {
+        var el = document.querySelector(selectors[i]);
+
+        if (el) {
+          var t = (
+            el.getAttribute("data-timeframe") ||
+            el.getAttribute("data-interval") ||
+            el.getAttribute("data-resolution") ||
+            el.textContent ||
+            ""
+          ).trim();
+
+          if (t) return t;
+        }
+      } catch (e) {}
+    }
+
+    if (candles.length >= 3) {
+      var a = candles[candles.length - 1].time;
+      var b = candles[candles.length - 2].time;
+
+      var sec = Math.round(Math.abs(a - b) / 1000);
+
+      if (sec === 60) return "1m";
+      if (sec === 300) return "5m";
+      if (sec === 900) return "15m";
+      if (sec === 1800) return "30m";
+      if (sec === 3600) return "1h";
+    }
+
+    return "UNKNOWN";
+  }
+
+  /* =========================
+     FULL DISCOVERY
+  ========================= */
+  async function discover() {
+
+    state.source = "NONE DETECTED";
+    state.candles = [];
+    state.hint = "NO PUBLIC CANDLE DATA FOUND";
+
+    var bridge = await bridgeStatus();
+
+    if (bridge) {
+      var bc = await bridgeCandles();
+
+      if (bc.length) {
+        state.candles = bc;
+        state.source = "LOCAL BRIDGE";
+        state.symbol = bridge.asset || "UNKNOWN";
+
+        var p = Number(bridge.period);
+
+        state.timeframe =
+          p === 60 ? "1m" :
+          p === 300 ? "5m" :
+          p === 900 ? "15m" :
+          p === 1800 ? "30m" :
+          p ? String(p) + "s" :
+          "UNKNOWN";
+
+        state.hint = "BRIDGE DATA FOUND";
+
+        return;
       }
     }
+
+    var tv = tradingViewScan();
+
+    if (tv.candles.length) {
+      state.candles = tv.candles;
+      state.source = "TRADINGVIEW PUBLIC DATA";
+      state.symbol = tv.symbol;
+      state.timeframe = tv.timeframe;
+      state.hint = "TRADINGVIEW DATA FOUND";
+
+      return;
+    }
+
+    var hc = highchartsScan();
+
+    if (hc.length) {
+      state.candles = hc;
+      state.source = "HIGHCHARTS PUBLIC DATA";
+      state.hint = "HIGHCHARTS DATA FOUND";
+
+      return;
+    }
+
+    var wa = windowArrayScan();
+
+    if (wa.candles.length) {
+      state.candles = wa.candles;
+      state.source = "PUBLIC WINDOW ARRAY";
+      state.hint = "WINDOW ARRAY: " + wa.found.join(", ");
+
+      return;
+    }
+
+    var dc = domScan();
+
+    if (dc.length) {
+      state.candles = dc;
+      state.source = "DOM OHLC DATA";
+      state.hint = "DOM OHLC DATA FOUND";
+
+      return;
+    }
+
+    state.symbol = detectSymbol(tv.symbol);
+    state.timeframe = detectTimeframe(
+      tv.timeframe,
+      []
+    );
+
+    var resources = resourceScan();
+    var globals = globalScan();
+
+    if (resources.length) {
+      state.hint =
+        "NO CANDLES. RESOURCE HINTS FOUND: " +
+        resources.length;
+    } else if (globals.length) {
+      state.hint =
+        "NO CANDLES. GLOBAL HINTS FOUND: " +
+        globals.join(", ");
+    } else {
+      state.hint =
+        "NO PUBLIC OHLC DATA EXPOSED TO MANGO";
+    }
+
+    state.debugResources = resources;
+    state.debugGlobals = globals;
+    state.tvKeys = tv.keys;
+  }
+
+  /* =========================
+     UI
+  ========================= */
+  var root = document.createElement("div");
+
+  root.id = "mango-diagnostic-root";
+
+  root.innerHTML =
+    '<div id="mango-btn" style="' +
+    'position:fixed;left:12px;top:45%;z-index:2147483646;' +
+    'width:58px;height:58px;border-radius:50%;' +
+    'background:#101722;border:3px solid #22c55e;' +
+    'display:flex;align-items:center;justify-content:center;' +
+    'color:#22c55e;font-weight:bold;font-size:12px;' +
+    'font-family:Arial;box-shadow:0 0 12px #000;' +
+    '">MANGO</div>' +
+
+    '<div id="mango-panel" style="' +
+    'display:none;position:fixed;left:72px;top:100px;' +
+    'z-index:2147483647;width:330px;max-height:80vh;' +
+    'overflow:auto;background:#07111f;color:#fff;' +
+    'border:1px solid #26364a;border-radius:10px;' +
+    'padding:12px;font-family:Arial;font-size:11px;' +
+    'box-shadow:0 10px 30px #000;' +
+    '">' +
+
+    '<div style="font-size:14px;font-weight:bold;color:#22c55e">' +
+    '🥭 MANGO BOT v4.3 DIAGNOSTIC' +
+    '<span id="mango-close" style="float:right;color:#fff;font-size:18px">×</span>' +
+    '</div>' +
+
+    '<button id="mango-scan" style="' +
+    'width:100%;margin:10px 0;padding:9px;' +
+    'background:#22c55e;color:#001b0a;border:0;' +
+    'border-radius:6px;font-weight:bold;' +
+    '">RUN DATA DIAGNOSTIC</button>' +
+
+    '<div id="mango-status" style="' +
+    'border:1px solid #334155;padding:10px;border-radius:6px;' +
+    'line-height:1.65;white-space:pre-wrap;' +
+    '">Ready.</div>' +
+
+    '<div style="margin-top:10px;color:#94a3b8">' +
+    'Diagnostic only — no trade execution.' +
+    '</div>' +
+
+    '</div>';
+
+  document.body.appendChild(root);
+
+  var btn = document.getElementById("mango-btn");
+  var panel = document.getElementById("mango-panel");
+  var close = document.getElementById("mango-close");
+  var scan = document.getElementById("mango-scan");
+  var box = document.getElementById("mango-status");
+
+  function show() {
+    panel.style.display = "block";
+  }
+
+  function hide() {
+    panel.style.display = "none";
+  }
+
+  btn.onclick = function (e) {
+    e.stopPropagation();
+    show();
+  };
+
+  close.onclick = function (e) {
+    e.stopPropagation();
+    hide();
+  };
+
+  /* =========================
+     DIAGNOSTIC REPORT
+  ========================= */
+  async function run() {
+
+    box.textContent = "Scanning public market data...";
+
+    await discover();
+
+    var c = state.candles || [];
 
     var lines = [];
 
-    for (var j = 0; j < fast.length; j++) {
-      lines.push(fast[j] - slow[j]);
-    }
-
-    if (lines.length < config.macdSignal) {
-      return null;
-    }
-
-    var signal =
-      lines
-        .slice(0, config.macdSignal)
-        .reduce(function (a, b) {
-          return a + b;
-        }, 0) /
-      config.macdSignal;
-
-    var kSignal =
-      2 / (config.macdSignal + 1);
-
-    for (
-      var x = config.macdSignal;
-      x < lines.length;
-      x++
-    ) {
-      signal =
-        lines[x] * kSignal +
-        signal * (1 - kSignal);
-    }
-
-    var line =
-      lines[lines.length - 1];
-
-    return {
-      line: line,
-      signal: signal,
-      histogram: line - signal
-    };
-  }
-
-  function momentum(values, period) {
-    if (!values || values.length <= period) {
-      return null;
-    }
-
-    var old =
-      values[values.length - 1 - period];
-
-    var current =
-      values[values.length - 1];
-
-    if (!old) {
-      return null;
-    }
-
-    return ((current / old) - 1) * 100;
-  }
-
-  function supportResistance(candles) {
-    if (
-      !candles ||
-      candles.length < config.srLookback
-    ) {
-      return null;
-    }
-
-    var slice = candles.slice(
-      candles.length - config.srLookback
+    lines.push(
+      "DATA SOURCE: " + state.source
     );
 
-    var support = Infinity;
-    var resistance = -Infinity;
+    lines.push(
+      "SYMBOL: " + state.symbol
+    );
 
-    for (var i = 0; i < slice.length; i++) {
-      support = Math.min(
-        support,
-        slice[i].low
+    lines.push(
+      "TIMEFRAME: " + state.timeframe
+    );
+
+    lines.push(
+      "CANDLE COUNT: " + c.length
+    );
+
+    if (c.length) {
+      var last = c[c.length - 1];
+
+      lines.push(
+        "LATEST CANDLE: " + fmtTime(last.time)
       );
 
-      resistance = Math.max(
-        resistance,
-        slice[i].high
-      );
-    }
-
-    return {
-      support: support,
-      resistance: resistance
-    };
-  }
-
-  /* ============================================================
-     10. ANALYSIS
-     ============================================================ */
-
-  function analyze(candles, symbol, timeframe, source) {
-    var latest =
-      candles[candles.length - 1];
-
-    var closes = candles.map(function (c) {
-      return c.close;
-    });
-
-    var live = freshness(
-      latest.timestamp,
-      timeframe
-    );
-
-    if (!live.live) {
-      return {
-        status: 'WAIT',
-        signal: 'NO DATA / WAIT',
-        reason: 'Candle data is stale.',
-        source: source,
-        symbol: symbol,
-        timeframe: timeframe,
-        candleCount: candles.length,
-        latest: latest,
-        freshness: live.label
-      };
-    }
-
-    if (
-      symbol === 'UNKNOWN' ||
-      timeframe === 'UNKNOWN'
-    ) {
-      return {
-        status: 'WAIT',
-        signal: 'NO DATA / WAIT',
-        reason: 'Symbol or timeframe could not be verified.',
-        source: source,
-        symbol: symbol,
-        timeframe: timeframe,
-        candleCount: candles.length,
-        latest: latest,
-        freshness: live.label
-      };
-    }
-
-    var ema9 = ema(
-      closes,
-      config.emaShort
-    );
-
-    var ema21 = ema(
-      closes,
-      config.emaMedium
-    );
-
-    var ema50 = ema(
-      closes,
-      config.emaLong
-    );
-
-    var r = rsi(
-      closes,
-      config.rsiPeriod
-    );
-
-    var m = macd(closes);
-
-    var mom = momentum(
-      closes,
-      config.momentumPeriod
-    );
-
-    var sr = supportResistance(
-      candles
-    );
-
-    if (
-      ema9 === null ||
-      ema21 === null ||
-      ema50 === null ||
-      r === null ||
-      !m ||
-      mom === null ||
-      !sr
-    ) {
-      return {
-        status: 'WAIT',
-        signal: 'NO DATA / WAIT',
-        reason: 'Insufficient data for indicators.',
-        source: source,
-        symbol: symbol,
-        timeframe: timeframe,
-        candleCount: candles.length,
-        latest: latest,
-        freshness: live.label
-      };
-    }
-
-    var bull = 0;
-    var bear = 0;
-
-    var reasons = [];
-
-    /* EMA */
-    if (
-      ema9 > ema21 &&
-      ema21 > ema50
-    ) {
-      bull += 25;
-      reasons.push('EMA bullish alignment');
-    } else if (
-      ema9 < ema21 &&
-      ema21 < ema50
-    ) {
-      bear += 25;
-      reasons.push('EMA bearish alignment');
-    }
-
-    /* Price / EMA50 */
-    if (latest.close > ema50) {
-      bull += 10;
-    } else if (latest.close < ema50) {
-      bear += 10;
-    }
-
-    /* RSI */
-    if (
-      r >= 50 &&
-      r < config.rsiOverbought
-    ) {
-      bull += 15;
-      reasons.push('RSI bullish');
-    } else if (
-      r <= 50 &&
-      r > config.rsiOversold
-    ) {
-      bear += 15;
-      reasons.push('RSI bearish');
-    }
-
-    /* MACD */
-    if (
-      m.line > m.signal &&
-      m.histogram > 0
-    ) {
-      bull += 20;
-      reasons.push('MACD bullish');
-    } else if (
-      m.line < m.signal &&
-      m.histogram < 0
-    ) {
-      bear += 20;
-      reasons.push('MACD bearish');
-    }
-
-    /* Momentum */
-    if (mom > 0) {
-      bull += 15;
-      reasons.push('Momentum positive');
-    } else if (mom < 0) {
-      bear += 15;
-      reasons.push('Momentum negative');
-    }
-
-    /* S/R */
-    var range =
-      sr.resistance - sr.support;
-
-    if (range > 0) {
-      var position =
-        (latest.close - sr.support) /
-        range;
-
-      if (position <= 0.25) {
-        bull += 15;
-        reasons.push('Price near support');
-      } else if (position >= 0.75) {
-        bear += 15;
-        reasons.push('Price near resistance');
-      }
-    }
-
-    var signal = 'WAIT';
-
-    if (
-      bull >= config.minScore &&
-      bull > bear
-    ) {
-      signal = 'UP';
-    }
-
-    if (
-      bear >= config.minScore &&
-      bear > bull
-    ) {
-      signal = 'DOWN';
-    }
-
-    /* Severe contradiction => WAIT */
-    if (
-      signal === 'UP' &&
-      (
-        m.histogram < 0 ||
-        mom < -0.15
-      )
-    ) {
-      signal = 'WAIT';
-      reasons.push('Major bullish contradiction');
-    }
-
-    if (
-      signal === 'DOWN' &&
-      (
-        m.histogram > 0 ||
-        mom > 0.15
-      )
-    ) {
-      signal = 'WAIT';
-      reasons.push('Major bearish contradiction');
-    }
-
-    return {
-      status: 'OK',
-      signal: signal,
-      source: source,
-      symbol: symbol,
-      timeframe: timeframe,
-      candleCount: candles.length,
-      latest: latest,
-      freshness: live.label,
-      score: Math.max(bull, bear),
-      bullScore: bull,
-      bearScore: bear,
-      ema9: ema9,
-      ema21: ema21,
-      ema50: ema50,
-      rsi: r,
-      macd: m.line,
-      macdSignal: m.signal,
-      macdHistogram: m.histogram,
-      momentum: mom,
-      support: sr.support,
-      resistance: sr.resistance,
-      reasons: reasons
-    };
-  }
-
-  /* ============================================================
-     11. MAIN ASYNC SCAN
-     ============================================================ */
-
-  async function scanMarket() {
-    state.error = '';
-
-    /* First choice: local Bridge */
-    var bridge = await discoverBridge();
-
-    if (bridge) {
-      var symbol =
-        bridge.asset !== 'UNKNOWN'
-          ? bridge.asset
-          : pageSymbol();
-
-      var timeframe =
-        bridge.period > 0
-          ? periodToTimeframe(bridge.period)
-          : pageTimeframe();
-
-      /*
-       * If page has a clearly detected symbol and it conflicts
-       * with Bridge asset, do not analyze the wrong instrument.
-       */
-      var pageSym = pageSymbol();
-
-      if (
-        pageSym !== 'UNKNOWN' &&
-        symbol !== 'UNKNOWN'
-      ) {
-        var a = symbol.replace('/', '');
-        var b = pageSym.replace('/', '');
-
-        if (
-          a !== b &&
-          a.indexOf(b) === -1 &&
-          b.indexOf(a) === -1
-        ) {
-          return {
-            status: 'WAIT',
-            signal: 'NO DATA / WAIT',
-            reason:
-              'Bridge asset does not match the displayed page asset.',
-            source: 'MANGO Bridge',
-            symbol: symbol,
-            pageSymbol: pageSym,
-            timeframe: timeframe,
-            candleCount: bridge.candles.length,
-            latest:
-              bridge.candles[
-                bridge.candles.length - 1
-              ],
-            freshness: 'NOT ANALYZED'
-          };
-        }
-      }
-
-      state.source = 'MANGO Bridge';
-      state.bridge = true;
-      state.symbol = symbol;
-      state.timeframe = timeframe;
-      state.candles = bridge.candles;
-
-      var bridgeResult = analyze(
-        bridge.candles,
-        symbol,
-        timeframe,
-        'MANGO Bridge'
+      lines.push(
+        "LATEST PRICE: " + last.close
       );
 
-      state.result = bridgeResult;
-
-      return bridgeResult;
+      lines.push(
+        "LATEST OHLC: " +
+        last.open + " / " +
+        last.high + " / " +
+        last.low + " / " +
+        last.close
+      );
+    } else {
+      lines.push("LATEST CANDLE: N/A");
+      lines.push("LATEST PRICE: N/A");
     }
 
-    /* Second choice: public webpage data */
-    var page = discoverPageCandles();
+    lines.push("");
+    lines.push("DIAGNOSTIC:");
+    lines.push(state.hint);
 
-    if (page) {
-      var pSymbol = pageSymbol();
-      var pTimeframe = pageTimeframe();
+    if (state.debugResources &&
+        state.debugResources.length) {
 
-      state.source = page.source;
-      state.bridge = false;
-      state.symbol = pSymbol;
-      state.timeframe = pTimeframe;
-      state.candles = page.candles;
-
-      var pageResult = analyze(
-        page.candles,
-        pSymbol,
-        pTimeframe,
-        page.source
+      lines.push("");
+      lines.push(
+        "RESOURCE HINTS: " +
+        state.debugResources.length
       );
 
-      state.result = pageResult;
-
-      return pageResult;
-    }
-
-    state.source = 'NONE DETECTED';
-    state.bridge = false;
-    state.symbol = pageSymbol();
-    state.timeframe = pageTimeframe();
-    state.candles = [];
-
-    var noData = {
-      status: 'WAIT',
-      signal: 'NO DATA / WAIT',
-      reason:
-        'No valid public page candles or local Bridge candles were found.',
-      source: 'NONE DETECTED',
-      symbol: state.symbol,
-      timeframe: state.timeframe,
-      candleCount: 0,
-      latest: null,
-      freshness: 'NO DATA'
-    };
-
-    state.result = noData;
-
-    return noData;
-  }
-
-  /* ============================================================
-     12. UI
-     ============================================================ */
-
-  var old =
-    document.getElementById(
-      'khilji-mango-root'
-    );
-
-  if (old) {
-    old.remove();
-  }
-
-  var root =
-    document.createElement('div');
-
-  root.id = 'khilji-mango-root';
-
-  root.style.cssText =
-    'position:fixed;' +
-    'z-index:2147483647;' +
-    'font-family:Arial,sans-serif;';
-
-  var button =
-    document.createElement('button');
-
-  button.innerHTML = '🥭<br><b>MANGO</b>';
-
-  button.style.cssText =
-    'position:fixed;' +
-    'left:20px;' +
-    'top:220px;' +
-    'width:70px;' +
-    'height:70px;' +
-    'border-radius:50%;' +
-    'border:2px solid #22c55e;' +
-    'background:#0f172a;' +
-    'color:white;' +
-    'font-size:15px;' +
-    'font-weight:bold;' +
-    'cursor:pointer;';
-
-  var panel =
-    document.createElement('div');
-
-  panel.style.cssText =
-    'display:none;' +
-    'position:fixed;' +
-    'left:105px;' +
-    'top:100px;' +
-    'width:350px;' +
-    'max-height:85vh;' +
-    'overflow:auto;' +
-    'padding:15px;' +
-    'box-sizing:border-box;' +
-    'background:#07111f;' +
-    'color:#e5e7eb;' +
-    'border:1px solid #334155;' +
-    'border-radius:12px;' +
-    'box-shadow:0 15px 40px rgba(0,0,0,.7);';
-
-  panel.innerHTML =
-    '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">' +
-      '<b style="color:#22c55e;">🥭 MANGO BOT v4.2</b>' +
-      '<button id="mango-close" style="background:none;border:0;color:#fff;font-size:18px;cursor:pointer;">✕</button>' +
-    '</div>' +
-
-    '<div id="mango-signal" style="text-align:center;font-size:22px;font-weight:900;padding:12px;margin-bottom:10px;border:1px solid #334155;border-radius:8px;">NO DATA / WAIT</div>' +
-
-    '<button id="mango-scan" style="width:100%;padding:11px;border:0;border-radius:8px;background:#22c55e;color:#06100a;font-weight:900;cursor:pointer;margin-bottom:10px;">SCAN MARKET</button>' +
-
-    '<div id="mango-info" style="font-family:monospace;font-size:11px;line-height:1.7;">' +
-      'DATA SOURCE: --<br>' +
-      'SYMBOL: --<br>' +
-      'TIMEFRAME: --<br>' +
-      'CANDLE COUNT: 0<br>' +
-      'LATEST CANDLE: --<br>' +
-      'LATEST PRICE: --<br>' +
-      'FRESHNESS: --<br>' +
-      'VALIDATION: --<br>' +
-      'EMA 9: --<br>' +
-      'EMA 21: --<br>' +
-      'EMA 50: --<br>' +
-      'RSI 14: --<br>' +
-      'MACD: --<br>' +
-      'MACD SIGNAL: --<br>' +
-      'MACD HIST: --<br>' +
-      'MOMENTUM: --<br>' +
-      'SUPPORT: --<br>' +
-      'RESISTANCE: --<br>' +
-      'BULL SCORE: 0<br>' +
-      'BEAR SCORE: 0' +
-    '</div>' +
-
-    '<div id="mango-reason" style="margin-top:10px;color:#94a3b8;font-size:11px;">Ready.</div>';
-
-  root.appendChild(button);
-  root.appendChild(panel);
-  document.body.appendChild(root);
-
-  var signalEl =
-    document.getElementById(
-      'mango-signal'
-    );
-
-  var infoEl =
-    document.getElementById(
-      'mango-info'
-    );
-
-  var reasonEl =
-    document.getElementById(
-      'mango-reason'
-    );
-
-  var scanBtn =
-    document.getElementById(
-      'mango-scan'
-    );
-
-  var closeBtn =
-    document.getElementById(
-      'mango-close'
-    );
-
-  function fmt(v, d) {
-    return v === null ||
-      v === undefined ||
-      !isFinite(Number(v))
-      ? '--'
-      : Number(v).toFixed(d || 2);
-  }
-
-  function display(result) {
-    var color = '#f59e0b';
-
-    if (result.signal === 'UP') {
-      color = '#22c55e';
-    } else if (result.signal === 'DOWN') {
-      color = '#ef4444';
-    }
-
-    signalEl.textContent =
-      result.signal || 'NO DATA / WAIT';
-
-    signalEl.style.color = color;
-    signalEl.style.borderColor = color;
-
-    var latest =
-      result.latest;
-
-    var latestTime =
-      latest
-        ? new Date(
-            latest.timestamp
-          ).toLocaleTimeString()
-        : '--';
-
-    var latestPrice =
-      latest
-        ? fmt(latest.close, 5)
-        : '--';
-
-    infoEl.innerHTML =
-      'DATA SOURCE: ' +
-      (result.source || '--') + '<br>' +
-
-      'SYMBOL: ' +
-      (result.symbol || '--') + '<br>' +
-
-      'TIMEFRAME: ' +
-      (result.timeframe || '--') + '<br>' +
-
-      'CANDLE COUNT: ' +
-      (result.candleCount || 0) + '<br>' +
-
-      'LATEST CANDLE: ' +
-      latestTime + '<br>' +
-
-      'LATEST PRICE: ' +
-      latestPrice + '<br>' +
-
-      'FRESHNESS: ' +
-      (result.freshness || '--') + '<br>' +
-
-      'VALIDATION: ' +
-      (
-        result.status === 'OK'
-          ? 'PASSED'
-          : 'FAILED / WAIT'
-      ) + '<br>' +
-
-      'EMA 9: ' +
-      fmt(result.ema9, 5) + '<br>' +
-
-      'EMA 21: ' +
-      fmt(result.ema21, 5) + '<br>' +
-
-      'EMA 50: ' +
-      fmt(result.ema50, 5) + '<br>' +
-
-      'RSI 14: ' +
-      fmt(result.rsi, 1) + '<br>' +
-
-      'MACD: ' +
-      fmt(result.macd, 5) + '<br>' +
-
-      'MACD SIGNAL: ' +
-      fmt(result.macdSignal, 5) + '<br>' +
-
-      'MACD HIST: ' +
-      fmt(result.macdHistogram, 5) + '<br>' +
-
-      'MOMENTUM: ' +
-      fmt(result.momentum, 2) + '%<br>' +
-
-      'SUPPORT: ' +
-      fmt(result.support, 5) + '<br>' +
-
-      'RESISTANCE: ' +
-      fmt(result.resistance, 5) + '<br>' +
-
-      'BULL SCORE: ' +
-      (result.bullScore || 0) + '<br>' +
-
-      'BEAR SCORE: ' +
-      (result.bearScore || 0);
-
-    reasonEl.textContent =
-      result.reason ||
-      (
-        result.reasons &&
-        result.reasons.length
-          ? result.reasons.join(' • ')
-          : 'No additional reason.'
-      );
-  }
-
-  async function executeScan() {
-    scanBtn.disabled = true;
-    scanBtn.textContent =
-      'READING REAL DATA...';
-
-    signalEl.textContent =
-      'WAIT...';
-
-    try {
-      var result =
-        await scanMarket();
-
-      display(result);
-    } catch (e) {
-      console.error(
-        '[MANGO BOT]',
-        e
-      );
-
-      display({
-        status: 'WAIT',
-        signal: 'NO DATA / WAIT',
-        reason:
-          'Bridge/page data could not be read.',
-        source: 'ERROR',
-        symbol: 'UNKNOWN',
-        timeframe: 'UNKNOWN',
-        candleCount: 0,
-        freshness: 'NO DATA'
+      state.debugResources.slice(-8).forEach(function (x) {
+        lines.push("- " + x.slice(0, 180));
       });
-    } finally {
-      scanBtn.disabled = false;
-      scanBtn.textContent =
-        'SCAN MARKET';
     }
+
+    if (state.debugGlobals &&
+        state.debugGlobals.length) {
+
+      lines.push("");
+      lines.push(
+        "GLOBAL HINTS:"
+      );
+
+      lines.push(
+        state.debugGlobals.join(", ")
+      );
+    }
+
+    if (state.tvKeys &&
+        state.tvKeys.length) {
+
+      lines.push("");
+      lines.push(
+        "TRADINGVIEW OBJECT KEYS:"
+      );
+
+      lines.push(
+        state.tvKeys.join(", ")
+      );
+    }
+
+    if (c.length >= CFG.minCandles) {
+      lines.push("");
+      lines.push(
+        "RESULT: REAL CANDLE DATA AVAILABLE"
+      );
+    } else {
+      lines.push("");
+      lines.push(
+        "RESULT: NO DATA / WAIT"
+      );
+    }
+
+    box.textContent = lines.join("\n");
   }
 
-  button.addEventListener(
-    'click',
-    function () {
-      panel.style.display =
-        panel.style.display === 'none'
-          ? 'block'
-          : 'none';
-    }
-  );
-
-  closeBtn.addEventListener(
-    'click',
-    function () {
-      panel.style.display =
-        'none';
-    }
-  );
-
-  scanBtn.addEventListener(
-    'click',
-    executeScan
-  );
-
-  window.__MANGO_BOT_INSTANCE__ = {
-    show: function () {
-      panel.style.display =
-        'block';
-      executeScan();
-    },
-
-    hide: function () {
-      panel.style.display =
-        'none';
-    },
-
-    scan: executeScan,
-
-    version: '4.2.0'
+  scan.onclick = function () {
+    run();
   };
 
-  console.log(
-    '[MANGO BOT] v4.2.0 loaded. Bridge + public candle discovery enabled.'
-  );
+  window.__MANGO_BOT_INSTANCE__ = {
+    show: show,
+    hide: hide,
+    scan: run,
+    version: "4.3.0-DIAGNOSTIC"
+  };
+
+  /* Open automatically */
+  show();
+
+  run();
 
 })();
